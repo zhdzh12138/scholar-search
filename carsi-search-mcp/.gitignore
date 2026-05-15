@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.carsi_state.json
+carsi.log
+*.pdf
+$null

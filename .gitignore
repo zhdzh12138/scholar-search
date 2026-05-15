@@ -1,0 +1,40 @@
+# Source repos (kept locally, not published)
+semantic-scholar-mcp/
+ieee-xplore-mcp/
+library-access-mcp/
+cnki-skills/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# CARSI state
+.carsi_state.json
+carsi.log
+*.pdf
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Research data (user-specific)
+Research/
+
+# Temp
+*.tmp
+*.bak

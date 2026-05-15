@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__fetch__fetch",
+      "Bash(curl *)",
+      "Bash(mkdir *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(cp *)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\zh\\Desktop\\claude_playground\\Scholar_search\\.claude\\agents"
+    ]
+  }
+}

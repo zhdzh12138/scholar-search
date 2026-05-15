@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "carsi-search": {
+      "command": "python",
+      "args": ["carsi-search-mcp/server.py"],
+      "env": {
+        "XIDIAN_USERNAME": "",
+        "XIDIAN_PASSWORD": "",
+        "HEADLESS": "true"
+      }
+    }
+  }
+}
