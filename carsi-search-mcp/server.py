@@ -104,6 +104,28 @@ async def list_tools() -> list[Tool]:
             description="Clear saved session cookies.",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
+        Tool(
+            name="cnki_search",
+            description="Search CNKI (中国知网) for papers. No login required.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search keywords (Chinese or English)"},
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="cnki_detail",
+            description="Get full paper metadata from a CNKI paper detail page. No login required.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "CNKI paper detail URL (contains kcms2/article/abstract)"},
+                },
+                "required": ["url"]
+            }
+        ),
     ]
 
 
@@ -119,6 +141,8 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
         elif name == "download": result = await handle_download(args)
         elif name == "status":   result = await handle_status(args)
         elif name == "logout":   result = await handle_logout(args)
+        elif name == "cnki_search":  result = await handle_cnki_search(args)
+        elif name == "cnki_detail":  result = await handle_cnki_detail(args)
         else: return [TextContent(type="text", text=f"Unknown tool: {name}")]
         elapsed = time.time() - t0
         result[0].text += f"\n\n⏱ {elapsed:.1f}s"
@@ -352,6 +376,80 @@ async def handle_logout(args: dict) -> list[TextContent]:
     _page = None
     _current_db = None
     return [TextContent(type="text", text="Session cleared. Next login requires credentials.")]
+
+
+# ── CNKI handlers (no CARSI login required) ─────────────────────────
+
+_carsiauth_for_cnki = None
+
+async def _ensure_cnki_browser():
+    """Create a standalone Playwright browser for CNKI (always headed — CNKI blocks headless)."""
+    global _carsiauth_for_cnki
+    if _carsiauth_for_cnki:
+        return _carsiauth_for_cnki
+    from carsi_search.engine import CarsiAuth
+    _carsiauth_for_cnki = CarsiAuth(headless=False)  # CNKI requires headed mode
+    await _carsiauth_for_cnki.start()
+    return _carsiauth_for_cnki
+
+
+async def handle_cnki_search(args: dict) -> list[TextContent]:
+    auth = await _ensure_cnki_browser()
+    page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
+
+    from carsi_search.databases.cnki import CnkiAdapter
+    adapter = CnkiAdapter(page)
+    result = await adapter.search(args["query"])
+
+    if not result.get("success"):
+        err = result.get("error", "unknown")
+        if err == "captcha":
+            return [TextContent(type="text", text="CNKI 正在显示滑块验证码。请在浏览器中手动完成验证后重试。")]
+        return [TextContent(type="text", text=f"CNKI search failed: {err}")]
+
+    papers = result.get("papers", [])
+    total = result.get("total", "?")
+    page_info = result.get("page", "1/1")
+    text = f"CNKI 搜索 \"{args['query']}\"：共 {total} 条结果 (第 {page_info} 页)\n\n"
+    for i, p in enumerate(papers):
+        text += f"[{i+1}] **{p.get('title', '?')}**\n"
+        if p.get("authors"): text += f"    作者: {p['authors']}\n"
+        if p.get("journal"): text += f"    期刊: {p['journal']}\n"
+        if p.get("date"): text += f"    日期: {p['date']}\n"
+        if p.get("citations"): text += f"    引用: {p['citations']}\n"
+        if p.get("url"): text += f"    URL: {p['url']}\n"
+        text += "\n"
+    text += "→ 使用 cnki_detail(url=URL) 获取论文详情"
+    return [TextContent(type="text", text=text)]
+
+
+async def handle_cnki_detail(args: dict) -> list[TextContent]:
+    auth = await _ensure_cnki_browser()
+    page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
+
+    from carsi_search.databases.cnki import CnkiAdapter
+    adapter = CnkiAdapter(page)
+    result = await adapter.detail(args["url"])
+
+    if not result.get("success"):
+        err = result.get("error", "unknown")
+        if err == "captcha":
+            return [TextContent(type="text", text="CNKI 验证码。请在浏览器中手动完成后重试。")]
+        return [TextContent(type="text", text=f"CNKI detail failed: {err}")]
+
+    text = ""
+    if result.get("title"): text += f"**{result['title']}**\n\n"
+    if result.get("authors"): text += f"**作者**: {', '.join(result['authors'])}\n"
+    if result.get("affiliations"): text += f"**单位**: {', '.join(result['affiliations'])}\n"
+    if result.get("journal"): text += f"**期刊**: {result['journal']}\n"
+    if result.get("pubInfo"): text += f"**出版信息**: {result['pubInfo']}\n"
+    if result.get("doi"): text += f"**DOI**: {result['doi']}\n"
+    if result.get("abstract"): text += f"\n**摘要**\n{result['abstract']}\n"
+    if result.get("keywords"): text += f"\n**关键词**: {', '.join(result['keywords'])}\n"
+    if result.get("fund"): text += f"**基金**: {result['fund']}\n"
+    if result.get("classification"): text += f"**分类号**: {result['classification']}\n"
+    if result.get("isOnlineFirst"): text += "**状态**: 网络首发\n"
+    return [TextContent(type="text", text=text or "未提取到详情")]
 
 
 async def main():

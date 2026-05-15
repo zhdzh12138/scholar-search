@@ -36,6 +36,15 @@ DB_REGISTRY = {
         "target_url_pattern": "**/ieeexplore.ieee.org/Xplore/**",
         "adapter": "carsi_search.databases.ieee:IeeeAdapter",
     },
+
+    "cnki": {
+        "name": "cnki",
+        "label": "CNKI 知网",
+        "home_url": "https://kns.cnki.net/kns8s/search",
+        "cookie_accept": [],
+        "target_url_pattern": "**/cnki.net/**",
+        "adapter": "carsi_search.databases.cnki:CnkiAdapter",
+    },
 }
 
 

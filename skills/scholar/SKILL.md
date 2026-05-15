@@ -27,7 +27,9 @@ PYTHONIOENCODING=utf-8 python scripts/s2.py search "{搜索词}" --limit 20
 - 结果中几乎没有中文论文（标题无中文字符）
 - 用户明确要求中文或使用 `--cnki`
 
-CNKI 搜索：调用 `/cnki-search {关键词}` 或 `/cnki-advanced-search {筛选条件}`
+CNKI 搜索：调用 `cnki_search(query="{关键词}")`
+
+**注意**：CNKI 会打开一个浏览器窗口（有头模式），首次使用可能需要手动完成滑块验证。后续调用自动复用会话。
 
 ## Step 3: IEEE 论文详情/下载 → CARSI
 
@@ -65,15 +67,14 @@ PYTHONIOENCODING=utf-8 python scripts/s2.py recommend "{PAPER_ID}" --limit 20
 PYTHONIOENCODING=utf-8 python scripts/s2.py author "{作者名}" --limit 10
 ```
 
-## CNKI Skills 参考
+## CNKI 知网
 
-- `/cnki-search {关键词}` — 基础搜索
-- `/cnki-advanced-search {条件}` — 高级搜索 (SCI/EI/CSSCI)
-- `/cnki-paper-detail {URL}` — 论文详情
-- `/cnki-journal-search {期刊名}` — 期刊查询
-- `/cnki-journal-index {期刊名}` — 期刊索引/影响因子
-- `/cnki-export zotero {URL}` — 导出到 Zotero
-- `/cnki-download {URL}` — PDF/CAJ 下载
+CNKI 操作通过 carsi-mcp 工具执行（Playwright 驱动，无需 Chrome DevTools MCP）：
+
+- `cnki_search(query="关键词")` — CNKI 论文搜索（返回标题、作者、期刊、日期、引用数）
+- `cnki_detail(url="详情页URL")` — CNKI 论文详情（返回摘要、关键词、基金、DOI、单位等）
+
+**验证码处理**：如果返回 captcha 错误，提示用户在浏览器中手动完成后重试。
 
 ## 完整工作流示例
 
@@ -91,6 +92,6 @@ PYTHONIOENCODING=utf-8 python scripts/s2.py author "{作者名}" --limit 10
 → PDF 保存到 downloads/ 目录，以论文名命名
 
 用户: 搜不到中文的
-→ /cnki-search {关键词}
+→ cnki_search(query="{关键词}")
 → 展示 CNKI 结果
 ```
