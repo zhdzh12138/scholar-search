@@ -1,49 +1,20 @@
 ---
 name: scholar-search
 description: >
-  统一学术论文搜索 - Semantic Scholar 搜索英文论文, CNKI 搜索中文论文,
-  CARSI 下载 IEEE 机构 PDF。自动路由最佳数据源。
+  统一学术论文搜索 - Semantic Scholar 搜索所有论文, CARSI 下载 IEEE 机构 PDF, CNKI 补充中文论文。
   Triggers on: '/scholar-search', 'search papers', 'find papers', '论文搜索', '搜索论文', 'academic search'.
-argument-hint: "[搜索词] [--cnki | --carsi-download URL | --detail PAPER_ID | --citations PAPER_ID | --recommend PAPER_ID | --author NAME]"
+argument-hint: "[搜索词] [--detail ID | --citations ID | --recommend ID | --author NAME | --save]"
 ---
 
 # 统一学术论文搜索
 
-你是学术论文搜索助手。根据用户需求自动选择最佳数据源。
-
-## 数据源路由
-
-| 用户意图 | 标志 | 数据源 | 执行方式 |
-|---------|------|--------|---------|
-| 英文论文/通用搜索 | (默认) | Semantic Scholar | Bash curl REST API |
-| 中文论文/核心期刊 | `--cnki` 或 S2 无中文结果 | CNKI 知网 | 调用 /cnki-search Skill |
-| IEEE 论文 PDF 下载 | `--carsi-download URL` | CARSI 机构访问 | 调用 carsi-mcp 工具 |
-| 论文详情 | `--detail ID` | Semantic Scholar | Bash curl REST API |
-| 引用/参考文献 | `--citations ID` | Semantic Scholar | Bash curl REST API |
-| 论文推荐 | `--recommend ID` | Semantic Scholar | Bash curl REST API |
-| 作者搜索 | `--author NAME` | Semantic Scholar | Bash curl REST API |
-| 保存论文到本地 | `--save` | 本地文件 | Bash 写入 Research/ 目录 |
-
-**解析 $ARGUMENTS**：从用户输入中提取搜索词和标志。例如：
-- `"transformer attention"` → 搜索词: transformer attention, 源: S2
-- `"深度学习 --cnki"` → 搜索词: 深度学习, 源: CNKI
-- `"--detail 10.1093/mind/lix.236.433"` → 获取 DOI 论文详情
+你是学术论文搜索助手。**Semantic Scholar 是唯一的搜索入口**，覆盖中英文论文。
 
 ---
 
-## Semantic Scholar (默认数据源)
+## 核心工作流
 
-### API Key
-
-从环境变量 `S2_API_KEY` 读取。如果未设置，省略 `-H` 头。
-
-**速率限制**：无 key 时严格限流 (约 1 req/5s)，有 key 为 10 req/s。强烈建议申请免费 key：https://www.semanticscholar.org/product/api#api-key-form
-
-构造 curl 时：如果 `$S2_API_KEY` 非空，添加 `-H "x-api-key: $S2_API_KEY"`；否则不加。
-
-**Windows 编码**：所有 curl 命令的 JSON 输出需要用 `PYTHONIOENCODING=utf-8` 管道到 python 解析，避免 GBK 编码错误。
-
-### 搜索论文
+### Step 1: 用 Semantic Scholar 搜索（所有查询都从这里开始）
 
 **必须使用 `search/bulk` 端点**（速率限制比 `/search` 宽松得多）。
 
@@ -54,13 +25,60 @@ if [ -n "$S2_API_KEY" ]; then API_KEY_HEADER="-H x-api-key:$S2_API_KEY"; fi
 curl -s "https://api.semanticscholar.org/graph/v1/paper/search/bulk?query=$QUERY&limit=20&fields=title,authors,year,citationCount,venue,abstract,externalIds,openAccessPdf,publicationDate,fieldsOfStudy,tldr,isOpenAccess,journal,publicationTypes" $API_KEY_HEADER
 ```
 
-**URL 编码**：搜索词中的空格替换为 `+`，中文需要 URL encode。
+- 搜索词中的空格替换为 `+`，中文需要 URL encode
+- `data` 数组中的每个对象即为一篇论文
+- DOI 从 `externalIds.DOI` 提取
+- PDF 从 `openAccessPdf.url` 提取
 
-**输出解析**：`data` 数组中的每个对象即为一篇论文。
+**输出格式**：
 
-### 获取论文详情
+```
+搜索 "{query}"：共 {total} 条结果
 
-支持的 ID 类型：DOI, ArXiv ID (如 `ArXiv:2301.07041`), CorpusId (如 `CorpusId:14636783`), S2 paper ID (SHA hash), MAG, ACL, PubMed, DBLP。
+[1] **{title}**
+    作者: {前5人，超过5人显示 "et al. (共N人)"}
+    年份: {year} | 会议: {venue} | 引用: {citationCount}
+    DOI: {externalIds.DOI} | PDF: {openAccessPdf.url}
+    TLDR: {tldr.text 或 abstract前300字}
+```
+
+### Step 2: 判断是否需要 CNKI 补充
+
+**自动触发 CNKI 的条件**（满足任一）：
+- S2 搜索结果少于 10 条
+- 结果中几乎没有中文论文（看标题是否有中文字符）
+- 用户明确要求中文论文或使用 `--cnki`
+
+**CNKI 搜索**：调用 `/cnki-search {关键词}` 或 `/cnki-advanced-search {筛选条件}`
+
+### Step 3: 用户需要 IEEE 论文详情或 PDF 时 → CARSI
+
+当用户对某篇 IEEE 论文（URL 含 `ieeexplore.ieee.org`）需要详细信息或下载 PDF 时：
+
+**直接调用**：
+1. `carsi_detail(url="论文URL")` — 获取完整元数据
+2. `carsi_download(url="论文URL")` — 下载 PDF
+
+**如果调用失败**（未登录/会话过期）：
+1. `carsi_login(database="ieee")` — 登录
+2. `carsi_status()`` — 确认登录成功
+3. 重新调用 `carsi_detail` 或 `carsi_download`
+
+**如果 carsi-mcp 未安装**：提供论文的 IEEE URL 让用户手动下载。
+
+---
+
+## Semantic Scholar API 参考
+
+### API Key
+
+从环境变量 `S2_API_KEY` 读取。未设置时省略 `-H` 头。
+
+**速率限制**：无 key 时严格限流 (约 1 req/5s)，有 key 为 10 req/s。建议申请：https://www.semanticscholar.org/product/api#api-key-form
+
+### 获取论文详情 (by ID)
+
+支持的 ID：DOI, ArXiv ID, CorpusId, S2 paper ID, MAG, ACL, PubMed, DBLP。
 
 ```bash
 curl -s "https://api.semanticscholar.org/graph/v1/paper/{PAPER_ID}?fields=title,authors,year,abstract,citationCount,venue,externalIds,openAccessPdf,tldr,referenceCount,influentialCitationCount,publicationTypes,journal,keywords,fieldsOfStudy"
@@ -69,21 +87,13 @@ curl -s "https://api.semanticscholar.org/graph/v1/paper/{PAPER_ID}?fields=title,
 ### 引用和参考文献
 
 ```bash
-# 被谁引用 (citations)
+# 被谁引用
 curl -s "https://api.semanticscholar.org/graph/v1/paper/{ID}/citations?fields=title,authors,year,isInfluential,contexts&limit=20"
-# 该论文的参考文献 (references)
+# 参考文献
 curl -s "https://api.semanticscholar.org/graph/v1/paper/{ID}/references?fields=title,authors,year,isInfluential&limit=20"
 ```
 
-**重要：字段名映射**
-- `/citations` 返回的每条记录中，论文数据在 `citingPaper` 字段（引用了目标论文的论文）
-- `/references` 返回的每条记录中，论文数据在 `citedPaper` 字段（目标论文引用的论文）
-- 每条记录还有 `isInfluential` (bool) 和 `contexts` (引用上下文)
-
-示例 JSON 结构：
-```json
-{"data": [{"isInfluential": true, "citedPaper": {"paperId": "...", "title": "...", "year": 2017}}]}
-```
+**字段名映射**：`citations` 返回 `citingPaper`，`references` 返回 `citedPaper`。
 
 ### 论文推荐
 
@@ -97,178 +107,56 @@ curl -s "https://api.semanticscholar.org/recommendations/v1/papers/forpaper/{PAP
 curl -s "https://api.semanticscholar.org/graph/v1/author/search?query={NAME}&fields=name,affiliations,paperCount,citationCount,hIndex&limit=10"
 ```
 
-### 标题精确匹配
-
-```bash
-curl -s "https://api.semanticscholar.org/graph/v1/paper/search?query={TITLE}&limit=1&fields=title,authors,year,citationCount,venue,externalIds,abstract&match_title=true"
-```
-
-### 输出格式
-
-解析 JSON 响应，格式化为可读列表：
-
-```
-搜索 "{query}"：共 {total} 条结果
-
-[1] **{title}**
-    作者: {authors前5人}
-    年份: {year} | 会议: {venue} | 引用: {citationCount}
-    DOI: {DOI} | PDF: {openAccessPdf.url}
-    TLDR: {tldr.text 或 abstract前300字}
-
-[2] ...
-```
-
-**DOI 格式**：从 `externalIds.DOI` 提取。
-**PDF 链接**：从 `openAccessPdf.url` 提取。
-**作者显示**：前5人用逗号分隔，超过5人显示 "et al. (共N人)"。
-
 ---
 
-## CNKI 搜索 (中文论文)
+## CNKI Skills 参考
 
-**触发条件**：用户加 `--cnki` 标志，或 Semantic Scholar 搜索结果中无中文论文。
+Chrome DevTools MCP 必须已注册。Chrome 需已启动。
 
-**前提**：Chrome DevTools MCP 已注册，Chrome 已启动并打开 CNKI。
-
-### 执行
-
-直接调用对应的 CNKI Skills：
-
-1. **搜索**: `/cnki-search {关键词}` 或 `/cnki-advanced-search {筛选条件}`
-2. **翻页/排序**: `/cnki-navigate-pages next` 或 `sort by date`
-3. **论文详情**: `/cnki-paper-detail {URL}`
-4. **期刊查询**: `/cnki-journal-search {期刊名}`
-5. **期刊索引**: `/cnki-journal-index {期刊名}`
-6. **导出引用**: `/cnki-export zotero {URL}` 或 `/cnki-export ris {URL}`
-7. **下载**: `/cnki-download {URL}`
-
-**如果 Chrome DevTools MCP 未安装**，提示用户：
-```
-需要 Chrome DevTools MCP 才能搜索 CNKI。安装命令：
-claude mcp add chrome-devtools -- npx -y chrome-devtools-mcp@latest
-```
-
----
-
-## CARSI IEEE 下载
-
-**触发条件**：用户使用 `--carsi-download` 标志，或需要下载 IEEE 论文 PDF。
-
-**前提**：carsi-search-mcp 已注册为 MCP server。
-
-### 执行
-
-1. **登录**: 调用 `carsi_login(database="ieee")` (首次或会话过期时)
-2. **搜索**: 调用 `carsi_search(query="论文标题")` 找到论文
-3. **下载**: 调用 `carsi_download(url="论文URL")` 下载 PDF
-
-### 首次使用配置
-
-```
-需要 CARSI MCP 才能通过机构权限下载 IEEE PDF。
-安装: pip install -r carsi-search-mcp/requirements.txt
-配置: 在 .mcp.json 中注册 carsi-search-mcp (设置 XIDIAN_USERNAME/XIDIAN_PASSWORD)
-```
-
-**如果 carsi-mcp 未安装**，提供替代方案：
-- 检查论文是否有 Open Access PDF 链接 (从 S2 的 openAccessPdf 字段)
-- 提供论文的 IEEE 页面 URL 让用户手动下载
+- `/cnki-search {关键词}` — 基础搜索
+- `/cnki-advanced-search {条件}` — 高级搜索 (SCI/EI/CSSCI 筛选)
+- `/cnki-paper-detail {URL}` — 论文详情
+- `/cnki-journal-search {期刊名}` — 期刊查询
+- `/cnki-journal-index {期刊名}` — 期刊索引/影响因子
+- `/cnki-export zotero {URL}` — 导出到 Zotero
+- `/cnki-download {URL}` — PDF/CAJ 下载
 
 ---
 
 ## 保存论文到本地
 
-**触发条件**：用户使用 `--save` 标志，或明确要求保存论文。
-
-### 步骤
-
-1. 创建目录（如不存在）:
-```bash
-mkdir -p Research/papers
-```
-
-2. 生成文件名: `{source}_{title_clean}.md`（source 为 s2/cnki/ieee，title_clean 取前30个字符，替换特殊字符）
-
-3. 写入结构化 Markdown:
-
-```markdown
-# {title}
-
-## 基本信息
-- **标题**: {title}
-- **作者**: {authors}
-- **年份**: {year}
-- **期刊/会议**: {venue}
-- **DOI**: {doi}
-- **来源**: Semantic Scholar / CNKI / IEEE
-
-## 学术指标
-- **引用数**: {citationCount}
-- **参考文献数**: {referenceCount}
-- **开放获取**: {isOpenAccess}
-
-## 摘要
-{abstract 或 TLDR}
-
-## 关键词
-{keywords 或 fieldsOfStudy}
-
-## 链接
-- **论文页面**: {url}
-- **PDF**: {pdf_url}
-
----
-## AI 笔记 / 阅读记录
-*待补充*
-```
-
-4. 更新索引:
-```bash
-# 如果 Research/README.md 不存在，创建表头
-# 追加一行: | 日期 | 标题 | 来源 | 引用数 |
-```
+用 Bash 写入 `Research/papers/` 目录，更新 `Research/README.md` 索引表。
 
 ---
 
 ## 完整工作流示例
 
-### 示例 1: 搜索英文论文
+### 示例 1: 英文搜索 + IEEE 下载
 ```
 用户: /scholar-search transformer attention mechanism
-→ 执行 S2 bulk search
-→ 返回格式化列表
+→ S2 搜索，返回 20 篇论文
+
+用户: 第 3 篇的 IEEE PDF 下载一下
+→ carsi_download(url="https://ieeexplore.ieee.org/document/xxx")
+→ 如果失败: carsi_login → carsi_status → 重试 carsi_download
 ```
 
-### 示例 2: 搜索中文论文
+### 示例 2: 中文搜索 + CNKI 补充
 ```
-用户: /scholar-search 深度学习 --cnki
-→ 调用 /cnki-search 深度学习
-→ 返回 CNKI 结果
-```
-
-### 示例 3: 获取论文详情
-```
-用户: /scholar-search --detail 10.1093/mind/lix.236.433
-→ curl S2 API 获取详情
-→ 返回完整元数据
+用户: /scholar-search 大语言模型
+→ S2 搜索，返回结果较少（中文覆盖有限）
+→ 自动调用 /cnki-search 大语言模型 补充
+→ 合并展示结果
 ```
 
-### 示例 4: 下载 IEEE PDF
-```
-用户: /scholar-search --carsi-download https://ieeexplore.ieee.org/document/123456
-→ 调用 carsi_login → carsi_download
-→ PDF 下载到本地
-```
-
-### 示例 5: 综合流程
+### 示例 3: 综合流程
 ```
 用户: /scholar-search 自然语言处理
-→ S2 搜索返回结果 (主要是英文论文)
-→ 用户: "搜不到中文的，用 CNKI"
-→ 调用 /cnki-search 自然语言处理
-→ 用户: "第3篇的 IEEE PDF 怎么下？"
-→ 调用 carsi_login → carsi_download
-→ 用户: "保存第1和第3篇"
+→ S2 搜索返回结果
+
+用户: 第 5 篇是 IEEE 的，看看详情
+→ carsi_detail(url="https://ieeexplore.ieee.org/document/xxx")
+
+用户: 保存这篇
 → 写入 Research/papers/ 并更新索引
 ```
