@@ -35,11 +35,17 @@ argument-hint: "[搜索词] [--cnki | --carsi-download URL | --detail PAPER_ID |
 
 ### API Key
 
-从环境变量 `S2_API_KEY` 读取。如果未设置，省略 `-H` 头（限速 1 req/s，有 key 为 10 req/s）。
+从环境变量 `S2_API_KEY` 读取。如果未设置，省略 `-H` 头。
+
+**速率限制**：无 key 时严格限流 (约 1 req/5s)，有 key 为 10 req/s。强烈建议申请免费 key：https://www.semanticscholar.org/product/api#api-key-form
 
 构造 curl 时：如果 `$S2_API_KEY` 非空，添加 `-H "x-api-key: $S2_API_KEY"`；否则不加。
 
+**Windows 编码**：所有 curl 命令的 JSON 输出需要用 `PYTHONIOENCODING=utf-8` 管道到 python 解析，避免 GBK 编码错误。
+
 ### 搜索论文
+
+**必须使用 `search/bulk` 端点**（速率限制比 `/search` 宽松得多）。
 
 ```bash
 QUERY="{URL_ENCODED_QUERY}"
@@ -48,9 +54,9 @@ if [ -n "$S2_API_KEY" ]; then API_KEY_HEADER="-H x-api-key:$S2_API_KEY"; fi
 curl -s "https://api.semanticscholar.org/graph/v1/paper/search/bulk?query=$QUERY&limit=20&fields=title,authors,year,citationCount,venue,abstract,externalIds,openAccessPdf,publicationDate,fieldsOfStudy,tldr,isOpenAccess,journal,publicationTypes" $API_KEY_HEADER
 ```
 
-**注意**：使用 `search/bulk` 端点（比 `search` 更宽松的速率限制）。
-
 **URL 编码**：搜索词中的空格替换为 `+`，中文需要 URL encode。
+
+**输出解析**：`data` 数组中的每个对象即为一篇论文。
 
 ### 获取论文详情
 
@@ -67,6 +73,16 @@ curl -s "https://api.semanticscholar.org/graph/v1/paper/{PAPER_ID}?fields=title,
 curl -s "https://api.semanticscholar.org/graph/v1/paper/{ID}/citations?fields=title,authors,year,isInfluential,contexts&limit=20"
 # 该论文的参考文献 (references)
 curl -s "https://api.semanticscholar.org/graph/v1/paper/{ID}/references?fields=title,authors,year,isInfluential&limit=20"
+```
+
+**重要：字段名映射**
+- `/citations` 返回的每条记录中，论文数据在 `citingPaper` 字段（引用了目标论文的论文）
+- `/references` 返回的每条记录中，论文数据在 `citedPaper` 字段（目标论文引用的论文）
+- 每条记录还有 `isInfluential` (bool) 和 `contexts` (引用上下文)
+
+示例 JSON 结构：
+```json
+{"data": [{"isInfluential": true, "citedPaper": {"paperId": "...", "title": "...", "year": 2017}}]}
 ```
 
 ### 论文推荐
