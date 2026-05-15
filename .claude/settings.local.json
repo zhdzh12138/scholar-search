@@ -6,10 +6,9 @@
       "Bash(mkdir *)",
       "Bash(cat *)",
       "Bash(ls *)",
-      "Bash(cp *)"
-    ],
-    "additionalDirectories": [
-      "c:\\Users\\zh\\Desktop\\claude_playground\\Scholar_search\\.claude\\agents"
+      "Bash(cp *)",
+      "Bash(PYTHONIOENCODING=utf-8 curl *)",
+      "Bash(PYTHONIOENCODING=utf-8 python *)"
     ]
   }
 }
