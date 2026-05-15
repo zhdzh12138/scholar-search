@@ -13,6 +13,9 @@ build/
 .venv/
 venv/
 
+# MCP config (contains credentials - use .mcp.json.example as template)
+.mcp.json
+
 # CARSI state
 .carsi_state.json
 carsi.log
