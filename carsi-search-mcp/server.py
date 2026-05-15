@@ -83,11 +83,12 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="download",
-            description="Open a paper PDF/download page in the browser.",
+            description="Download a paper PDF to the project's downloads/ directory with the paper title as filename.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "Paper detail URL (or direct PDF URL)"},
+                    "title": {"type": "string", "description": "Paper title (used as filename). If omitted, extracted from the page."},
                     "database": {"type": "string", "description": f"Database key. {DB_LIST}"},
                 },
                 "required": ["url"]
@@ -263,12 +264,15 @@ async def handle_download(args: dict) -> list[TextContent]:
         log.info("[CARSI] Session restored from cookies")
 
     url = args["url"]
+    title = args.get("title", "")
 
-    # Get detail to find PDF link
+    # Get detail to find PDF link (and title if not provided)
     if "stamp.jsp" not in url and "/pdf/" not in url and "getPDF.jsp" not in url:
         detail_result = await _auth.detail(_page, db or "zhizhen", url)
         if detail_result.get("pdfUrl"):
             url = detail_result["pdfUrl"]
+        if not title and detail_result.get("title"):
+            title = detail_result["title"]
 
     # Convert stamp.jsp to getPDF.jsp (direct download endpoint)
     if "stamp.jsp" in url:
@@ -278,8 +282,7 @@ async def handle_download(args: dict) -> list[TextContent]:
 
     # Fetch PDF via browser JS (has auth cookies) → base64 → save to disk
     await _page.unroute("**/*")
-    import base64
-    from datetime import datetime
+    import base64, re
     pdf_b64 = await _page.evaluate(f"""
         async () => {{
             try {{
@@ -298,8 +301,18 @@ async def handle_download(args: dict) -> list[TextContent]:
 
     if pdf_b64 and not pdf_b64.startswith('ERROR:') and not pdf_b64.startswith('HTTP '):
         pdf_data = base64.b64decode(pdf_b64)
-        out_dir = Path(__file__).parent
-        save_path = out_dir / f"paper_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        # Save to project_root/downloads/ with paper title as filename
+        project_root = Path(__file__).parent.parent
+        downloads_dir = project_root / "downloads"
+        downloads_dir.mkdir(exist_ok=True)
+        if title:
+            # Sanitize title for filename: keep alphanumeric, Chinese, spaces, replace others
+            safe_title = re.sub(r'[<>:"/\\|?*]', '', title).strip()
+            safe_title = safe_title[:80]  # limit length
+            filename = f"{safe_title}.pdf"
+        else:
+            filename = f"paper_{int(__import__('time').time())}.pdf"
+        save_path = downloads_dir / filename
         save_path.write_bytes(pdf_data)
         return [TextContent(type="text",
             text=f"Downloaded PDF ({len(pdf_data)} bytes)\nSaved: {save_path}")]

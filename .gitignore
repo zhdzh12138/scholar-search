@@ -35,7 +35,8 @@ node_modules/
 Thumbs.db
 desktop.ini
 
-# Research data (user-specific)
+# Downloaded papers and research data (user-specific)
+downloads/
 Research/
 
 # Temp
