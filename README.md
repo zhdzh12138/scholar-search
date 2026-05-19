@@ -1,121 +1,101 @@
 # Scholar Search — 统一学术论文搜索
 
-Claude Code Skill 集合：Semantic Scholar 搜索 + CNKI 知网 + CARSI 机构 PDF 下载。
+Claude Code Skill + MCP：Semantic Scholar 搜索 + CNKI 知网 + CARSI 机构 PDF 下载。
 
-## 快速开始
+## 安装
 
-### 1. 克隆到任意位置
+### 1. 安装 Skills 和 Agents（全局可用）
 
 ```bash
 git clone https://github.com/zhdzh12138/scholar-search.git ~/scholar-search
+
+# 复制到 Claude Code 全局目录（所有项目共享）
+cp -r ~/scholar-search/skills/* ~/.claude/skills/
+cp -r ~/scholar-search/agents/* ~/.claude/agents/
 ```
 
-### 2. 复制到你的项目
-
-```bash
-# 进入你的工作项目
-cd /path/to/your-project
-
-# 复制 skills 和 agents
-cp -r ~/scholar-search/skills .claude/skills
-cp -r ~/scholar-search/agents .claude/agents
-
-# 复制辅助脚本（S2 API 调用 + 格式化）
-cp -r ~/scholar-search/scripts .
-```
-
-### 3. 配置 CARSI MCP（可选，用于 IEEE 机构 PDF 下载）
-
-```bash
-# 复制 MCP 配置模板
-cp ~/scholar-search/.mcp.json.example .mcp.json
-
-# 编辑 .mcp.json，填入你的学号密码
-# 将 args 中的路径改为实际路径
-```
-
-`.mcp.json` 示例：
-
-```json
-{
-  "mcpServers": {
-    "carsi-search": {
-      "command": "python",
-      "args": ["~/scholar-search/carsi-search-mcp/server.py"],
-      "env": {
-        "XIDIAN_USERNAME": "你的学号",
-        "XIDIAN_PASSWORD": "你的密码",
-        "HEADLESS": "true"
-      }
-    }
-  }
-}
-```
-
-### 4. 安装 CARSI 依赖（可选）
+### 2. 安装 CARSI MCP（可选，用于 IEEE PDF 下载）
 
 ```bash
 pip install playwright mcp
 python -m playwright install chromium
 ```
 
-### 5. 开始使用
+注册 MCP 服务器（全局配置，所有项目共享）：
 
-重启 Claude Code，在你的项目中使用：
+```bash
+claude mcp add carsi-search -- python ~/scholar-search/carsi-search-mcp/server.py
+```
 
-```text
+或手动编辑 `~/.claude/settings.json`，在 `mcpServers` 中添加：
+
+```json
+{
+  "carsi-search": {
+    "command": "python",
+    "args": ["C:/Users/你的用户名/scholar-search/carsi-search-mcp/server.py"],
+    "env": {
+      "XIDIAN_USERNAME": "你的学号",
+      "XIDIAN_PASSWORD": "你的密码",
+      "HEADLESS": "true"
+    }
+  }
+}
+```
+
+### 3. 设置 Semantic Scholar API Key（可选）
+
+免费申请：https://www.semanticscholar.org/product/api#api-key-form
+
+设置环境变量后速率从 1 req/s 提升到 10 req/s。
+
+## 使用
+
+在**任意项目**中打开 Claude Code，直接使用：
+
+```
 /scholar-search transformer attention mechanism    # 搜索论文
 /scholar-search --detail DOI:10.xxxx              # 论文详情
-/scholar-search --citations paper_id              # 查看引用
-/scholar-search 深度学习 --cnki                    # CNKI 中文搜索
+/scholar-search --citations paper_id              # 引用分析
+/scholar-search --recommend paper_id              # 论文推荐
+/scholar-search --author "Geoffrey Hinton"        # 作者搜索
+/scholar-search 深度学习                           # 自动补充 CNKI
 ```
 
 ## 功能
 
-| 功能 | 命令 | 数据源 |
-|------|------|--------|
-| 搜索论文 | `/scholar-search {关键词}` | Semantic Scholar |
-| 论文详情 | `/scholar-search --detail {ID}` | Semantic Scholar |
-| 引用分析 | `/scholar-search --citations {ID}` | Semantic Scholar |
-| 论文推荐 | `/scholar-search --recommend {ID}` | Semantic Scholar |
-| 作者搜索 | `/scholar-search --author {名字}` | Semantic Scholar |
-| 中文论文 | `/cnki-search {关键词}` | CNKI 知网 |
-| 高级搜索 | `/cnki-advanced-search {条件}` | CNKI (SCI/EI/CSSCI) |
-| 期刊查询 | `/cnki-journal-search {期刊名}` | CNKI |
-| 期刊索引 | `/cnki-journal-index {期刊名}` | CNKI |
-| IEEE PDF 下载 | `carsi_download(url, title)` | CARSI 机构访问 |
-| 导出到 Zotero | `/cnki-export zotero {URL}` | CNKI |
+| 功能 | 数据源 | 需要安装 |
+|------|--------|---------|
+| 论文搜索 | Semantic Scholar | 无（curl） |
+| 论文详情/引用/推荐 | Semantic Scholar | 无（curl） |
+| 作者搜索 | Semantic Scholar | 无（curl） |
+| 中文论文搜索 | CNKI 知网 | carsi-search-mcp |
+| CNKI 论文详情 | CNKI 知网 | carsi-search-mcp |
+| IEEE PDF 下载 | CARSI 机构访问 | carsi-search-mcp + Playwright |
+
+## 工作流
+
+```
+搜索 → S2（唯一入口，覆盖中英文）
+  │
+  ├─ IEEE 详情/下载 → carsi_detail / carsi_download
+  │   └─ 失败 → carsi_login → 重试
+  │
+  └─ 中文不足 → cnki_search 补充
+```
 
 ## 项目结构
 
 ```text
 scholar-search/
-├── README.md
-├── LICENSE
-├── agents/                         # 复制到 .claude/agents/
-│   └── scholar-assistant.md        # 统一搜索协调 Agent
-├── skills/                         # 复制到 .claude/skills/
-│   └── scholar/
-│       └── SKILL.md                # 统一搜索 Skill
-├── scripts/                        # 复制到项目根目录
-│   └── s2.py                       # Semantic Scholar API 辅助脚本
-├── carsi-search-mcp/               # CARSI MCP 服务器（可选）
-│   ├── server.py
-│   └── carsi_search/
-├── .mcp.json.example               # MCP 配置模板
-├── .gitignore
-└── LICENSE
-```
-
-## 工作流程
-
-```text
-搜索 → S2 (唯一入口，覆盖中英文)
-  │
-  ├─ IEEE 详情/下载 → carsi_detail / carsi_download
-  │   └─ 失败 → carsi_login → 重试
-  │
-  └─ 中文不足 → /cnki-search 补充
+├── skills/                         # 复制到 ~/.claude/skills/
+│   └── scholar/SKILL.md            # 统一搜索 Skill（自包含，用 curl）
+│   └── cnki-*/SKILL.md             # CNKI Skills（Chrome DevTools MCP）
+├── agents/                         # 复制到 ~/.claude/agents/
+│   └── scholar-assistant.md        # 搜索协调 Agent
+└── carsi-search-mcp/               # MCP 服务器（全局注册一次）
+    ├── server.py                   # 入口
+    └── carsi_search/               # IEEE + CNKI + Zhizhen 适配器
 ```
 
 ## 依赖
@@ -123,10 +103,9 @@ scholar-search/
 | 组件 | 必需 | 用途 |
 |------|------|------|
 | Claude Code | 是 | Skill 宿主 |
-| Python 3.10+ | 是 | scripts/s2.py |
-| S2_API_KEY | 否 | Semantic Scholar (无 key 限速) |
-| Playwright | CARSI 需要 | IEEE 机构 PDF 下载 |
-| CNKI 账号 | CNKI 下载需要 | CNKI PDF 下载 |
+| S2_API_KEY | 否 | Semantic Scholar（无 key 限速） |
+| Playwright + mcp | CARSI/CNKI 需要 | MCP 服务器运行时 |
+| 西电账号 | CARSI 需要 | IEEE 机构 PDF 下载 |
 
 ## 致谢
 
