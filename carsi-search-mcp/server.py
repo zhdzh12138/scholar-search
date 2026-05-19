@@ -106,11 +106,17 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="cnki_search",
-            description="Search CNKI (中国知网) for papers. No login required.",
+            description="Search CNKI (中国知网) for papers. No login required. Supports advanced filters.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search keywords (Chinese or English)"},
+                    "author": {"type": "string", "description": "Filter by author name"},
+                    "journal": {"type": "string", "description": "Filter by journal/source name"},
+                    "year_start": {"type": "string", "description": "Start year (e.g. '2020')"},
+                    "year_end": {"type": "string", "description": "End year (e.g. '2025')"},
+                    "page": {"type": "integer", "description": "Page number (default 1)", "default": 1},
+                    "sort": {"type": "string", "description": "Sort: relevance, date, citations, downloads"},
                 },
                 "required": ["query"]
             }
@@ -399,7 +405,15 @@ async def handle_cnki_search(args: dict) -> list[TextContent]:
 
     from carsi_search.databases.cnki import CnkiAdapter
     adapter = CnkiAdapter(page)
-    result = await adapter.search(args["query"])
+    result = await adapter.search(
+        args["query"],
+        author=args.get("author"),
+        journal=args.get("journal"),
+        year_start=args.get("year_start"),
+        year_end=args.get("year_end"),
+        page=args.get("page", 1),
+        sort=args.get("sort"),
+    )
 
     if not result.get("success"):
         err = result.get("error", "unknown")
