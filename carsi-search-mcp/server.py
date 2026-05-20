@@ -524,27 +524,60 @@ async def handle_cnki_detail(args: dict) -> list[TextContent]:
 
 async def handle_cnki_download(args: dict) -> list[TextContent]:
     ctx = await _ensure_cnki_browser()
-    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+    # Find or reuse CNKI tab
+    page = None
+    for p in ctx.pages:
+        if 'cnki.net' in p.url:
+            page = p
+            break
+    if not page:
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
-    from carsi_search.databases.cnki import CnkiAdapter
-    adapter = CnkiAdapter(page)
-    result = await adapter.download(args["url"])
+    url = args["url"]
+    from playwright.async_api import Error as PwError
 
-    if result.get("success"):
-        return [TextContent(type="text",
-            text=f"CNKI {result.get('format', '?')} 下载成功：{result.get('title', '')}\n"
-                 f"大小: {result.get('size', 0)} bytes\n保存: {result.get('path', '')}")]
+    # Navigate to detail page
+    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+    try:
+        await page.wait_for_selector('.brief h1', timeout=15000)
+    except Exception:
+        pass
+    await asyncio.sleep(1)
 
-    err = result.get("error", "unknown")
-    if err == "captcha":
+    # Check login
+    not_logged = await page.evaluate(
+        "() => !!document.querySelector('.downloadlink.icon-notlogged, [class*=\"notlogged\"]')"
+    )
+    if not_logged:
+        return [TextContent(type="text", text="下载需要登录 CNKI。请先在 Chrome 中登录知网账号。")]
+
+    # Check captcha
+    captcha = await page.evaluate("""() => {
+        const el = document.querySelector('#tcaptcha_transform_dy');
+        return el && el.getBoundingClientRect().top >= 0;
+    }""")
+    if captcha:
         return [TextContent(type="text", text="CNKI 验证码。请在浏览器中手动完成后重试。")]
-    if err == "not_logged_in":
-        return [TextContent(type="text", text="下载需要登录 CNKI。请先调用 cnki_login 登录。")]
-    if err == "download_blocked":
-        return [TextContent(type="text", text=result.get("message", "下载被拦截，请在浏览器中手动完成。"))]
-    if err == "no_download_link":
-        return [TextContent(type="text", text="未找到下载链接，该论文可能不提供 PDF/CAJ。")]
-    return [TextContent(type="text", text=f"CNKI download failed: {err}")]
+
+    has_pdf = await page.evaluate("() => !!document.querySelector('#pdfDown, .btn-dlpdf a')")
+    if not has_pdf:
+        return [TextContent(type="text", text="未找到下载链接。")]
+
+    # Click download and capture file
+    try:
+        async with page.expect_download(timeout=60000) as dl_info:
+            await page.locator('#pdfDown, .btn-dlpdf a').first.click()
+        dl = await dl_info.value
+        fname = dl.suggested_filename or 'paper.pdf'
+        download_dir = os.environ.get("DOWNLOAD_DIR", os.getcwd())
+        save_path = Path(download_dir) / "downloads" / fname
+        save_path.parent.mkdir(exist_ok=True)
+        await dl.save_as(str(save_path))
+        return [TextContent(type="text",
+            text=f"CNKI PDF 下载成功：{fname}\n"
+                 f"大小: {save_path.stat().st_size} bytes\n保存: {save_path}")]
+    except PwError:
+        return [TextContent(type="text", text="下载超时。PDF 可能已在浏览器中打开，请手动保存。")]
 
 
 async def main():
