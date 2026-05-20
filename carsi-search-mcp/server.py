@@ -364,8 +364,11 @@ async def handle_download(args: dict) -> list[TextContent]:
             return [TextContent(type="text",
                 text=f"Download failed: response is not a PDF (可能是登录过期或权限不足).\n"
                      f"Opened page in browser for manual download.\nFirst bytes: {snippet[:100]}")]
-        # Save to downloads/ in the calling project directory
-        download_dir = os.environ.get("DOWNLOAD_DIR") or os.getcwd()
+        # Download to user's project directory (set DOWNLOAD_DIR in .mcp.json)
+        download_dir = os.environ.get("DOWNLOAD_DIR", "")
+        if not download_dir:
+            # Fallback: try to use the directory where the MCP was invoked
+            download_dir = os.getcwd()
         downloads_dir = Path(download_dir) / "downloads"
         downloads_dir.mkdir(exist_ok=True)
         if title:
@@ -421,7 +424,7 @@ async def handle_logout(args: dict) -> list[TextContent]:
 
 
 async def handle_cnki_login(args: dict) -> list[TextContent]:
-    """Login to CNKI via CARSI off-campus access."""
+    """Login to CNKI via 机构登录 → 校外访问 → CARSI."""
     auth = await _ensure_cnki_browser()
     page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
 
@@ -430,39 +433,15 @@ async def handle_cnki_login(args: dict) -> list[TextContent]:
     if not username or not password:
         return [TextContent(type="text", text="需要学号和密码。")]
 
-    # Direct CARSI URL for CNKI (bypasses fsso.cnki.net autocomplete)
-    carsi_url = (
-        "https://fsso.cnki.net/Shibboleth.sso/Login"
-        "?entityID=https%3A%2F%2Fidp.xidian.edu.cn%2Fidp%2Fshibboleth"
-        "&target=https%3A%2F%2Ffsso.cnki.net%2Fcarsi%2Fsecure"
-    )
-    await page.goto(carsi_url, wait_until="domcontentloaded", timeout=30000)
-    await asyncio.sleep(3)
+    from carsi_search.databases.cnki import CnkiAdapter
+    adapter = CnkiAdapter(page)
+    result = await adapter.login(username, password, carsi_auth=auth)
 
-    # Use CARSI engine (handles IdP + consent pages)
-    if "idp.xidian.edu.cn" in page.url:
-        await auth._handle_cas_login(page, username, password)
-        await asyncio.sleep(1)
-
-    # Handle remaining consent pages
-    for _ in range(5):
-        if "idp.xidian.edu.cn" not in page.url:
-            break
-        await page.evaluate("""() => {
-            document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-                cb.checked = true; cb.dispatchEvent(new Event('change', {bubbles:true}));
-            });
-            document.querySelectorAll('button, input[type="submit"]').forEach(b => {
-                if (!(b.textContent||b.value||'').includes('拒绝')) b.click();
-            });
-        }""")
-        await asyncio.sleep(3)
-
-    if "cnki.net" in page.url:
+    if result.get("success"):
         await auth.context.storage_state(path=str(CNKI_STATE_FILE))
-        return [TextContent(type="text", text=f"CNKI 校外登录成功！已保存会话。\n页面: {page.url[:100]}")]
+        return [TextContent(type="text", text=f"CNKI 机构登录成功！已保存会话。\n页面: {result['url'][:100]}")]
     else:
-        return [TextContent(type="text", text=f"登录流程完成，请检查浏览器。\n页面: {page.url[:100]}")]
+        return [TextContent(type="text", text=f"登录流程完成，请检查浏览器。\n页面: {result['url'][:100]}")]
 
 _carsiauth_for_cnki = None
 CNKI_STATE_FILE = Path(__file__).parent / ".cnki_state.json"
@@ -557,18 +536,21 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
     adapter = CnkiAdapter(page)
     result = await adapter.download(args["url"])
 
-    if not result.get("success"):
-        err = result.get("error", "unknown")
-        if err == "captcha":
-            return [TextContent(type="text", text="CNKI 验证码。请在浏览器中手动完成后重试。")]
-        if err == "not_logged_in":
-            return [TextContent(type="text", text="下载需要登录 CNKI。请在浏览器中登录知网账号后重试。")]
-        if err == "no_download_link":
-            return [TextContent(type="text", text="未找到下载链接，可能该论文不提供 PDF/CAJ 下载。")]
-        return [TextContent(type="text", text=f"CNKI download failed: {err}")]
+    if result.get("success"):
+        return [TextContent(type="text",
+            text=f"CNKI {result.get('format', '?')} 下载成功：{result.get('title', '')}\n"
+                 f"大小: {result.get('size', 0)} bytes\n保存: {result.get('path', '')}")]
 
-    return [TextContent(type="text",
-        text=f"{result.get('format', '?')} 下载已触发：{result.get('title', '')}\n请在浏览器下载管理器中查看。")]
+    err = result.get("error", "unknown")
+    if err == "captcha":
+        return [TextContent(type="text", text="CNKI 验证码。请在浏览器中手动完成后重试。")]
+    if err == "not_logged_in":
+        return [TextContent(type="text", text="下载需要登录 CNKI。请先调用 cnki_login 登录。")]
+    if err == "download_blocked":
+        return [TextContent(type="text", text=result.get("message", "下载被拦截，请在浏览器中手动完成。"))]
+    if err == "no_download_link":
+        return [TextContent(type="text", text="未找到下载链接，该论文可能不提供 PDF/CAJ。")]
+    return [TextContent(type="text", text=f"CNKI download failed: {err}")]
 
 
 async def main():

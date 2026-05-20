@@ -2,11 +2,12 @@
   "mcpServers": {
     "carsi-search": {
       "command": "python",
-      "args": ["carsi-search-mcp/server.py"],
+      "args": ["~/scholar-search/carsi-search-mcp/server.py"],
       "env": {
         "XIDIAN_USERNAME": "你的学号",
         "XIDIAN_PASSWORD": "你的密码",
-        "HEADLESS": "true"
+        "HEADLESS": "true",
+        "DOWNLOAD_DIR": ""
       }
     }
   }

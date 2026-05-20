@@ -7,6 +7,7 @@ After that, the session persists and subsequent calls work without interaction.
 """
 
 import asyncio
+import urllib.parse
 from .base import BaseAdapter
 
 
@@ -22,6 +23,60 @@ SORT_MAP = {
 class CnkiAdapter(BaseAdapter):
     name = "cnki"
     home_url = "https://kns.cnki.net/kns8s/search"
+
+    async def login(self, username: str, password: str, carsi_auth=None) -> dict:
+        """Login to CNKI via 机构登录 → 校外访问 → CARSI."""
+        # Navigate to CNKI
+        await self._navigate(self.home_url)
+        await asyncio.sleep(2)
+
+        # Click 机构登录
+        try:
+            inst_login = self.page.locator('a:has-text("机构登录"), a:has-text("机构馆")').first
+            if await inst_login.count() > 0:
+                await inst_login.click()
+                await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        # Click 校外访问
+        try:
+            offcampus = self.page.locator('text=校外访问').first
+            if await offcampus.count() > 0:
+                await offcampus.click()
+                await asyncio.sleep(3)
+        except Exception:
+            pass
+
+        # Now should be at fsso.cnki.net or IdP
+        current = self.page.url
+        if "idp.xidian.edu.cn" in current and carsi_auth:
+            # Use CARSI engine for IdP login
+            await carsi_auth._handle_cas_login(self.page, username, password)
+            await asyncio.sleep(1)
+
+            # Handle remaining consent pages
+            for _ in range(5):
+                if "idp.xidian.edu.cn" not in self.page.url:
+                    break
+                await self.page.evaluate("""() => {
+                    document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                        cb.checked = true; cb.dispatchEvent(new Event('change', {bubbles:true}));
+                    });
+                    document.querySelectorAll('button, input[type="submit"]').forEach(b => {
+                        if (!(b.textContent||b.value||'').includes('拒绝')) b.click();
+                    });
+                }""")
+                await asyncio.sleep(3)
+
+        # Verify we're logged in on kns.cnki.net (not captcha page)
+        await asyncio.sleep(2)
+        url = self.page.url
+        if "cnki.net" in url and "verify" not in url:
+            return {"success": True, "url": url}
+        if "verify" in url:
+            return {"success": True, "url": url, "note": "验证码页面，请在浏览器中手动完成"}
+        return {"success": False, "url": url}
     adv_url = "https://kns.cnki.net/kns/AdvSearch?classid=7NS01R8M"
 
     async def search(self, query: str, **kwargs) -> dict:
@@ -281,7 +336,7 @@ class CnkiAdapter(BaseAdapter):
         return False
 
     async def download(self, url: str, **kwargs) -> dict:
-        """Click download link on a CNKI paper detail page. Requires login."""
+        """Download PDF from CNKI. Clicks link, Playwright captures the download."""
         await self._navigate(url)
 
         try:
@@ -292,23 +347,42 @@ class CnkiAdapter(BaseAdapter):
         if await self._check_captcha():
             return {"success": False, "error": "captcha"}
 
-        result = await self.page.evaluate("""
+        info = await self.page.evaluate("""
             () => {
-                // Check login status
                 const notLogged = document.querySelector('.downloadlink.icon-notlogged')
                     || document.querySelector('[class*="notlogged"]');
-                if (notLogged)
-                    return { success: false, error: 'not_logged_in' };
-
+                if (notLogged) return { error: 'not_logged_in' };
                 const title = document.querySelector('.brief h1')?.innerText?.trim()
                     ?.replace(/\\s*网络首发\\s*$/, '') || '';
-
-                const pdfLink = document.querySelector('#pdfDown') || document.querySelector('.btn-dlpdf a');
-                const cajLink = document.querySelector('#cajDown') || document.querySelector('.btn-dlcaj a');
-
-                if (pdfLink) { pdfLink.click(); return { success: true, format: 'PDF', title }; }
-                if (cajLink) { cajLink.click(); return { success: true, format: 'CAJ', title }; }
-                return { success: false, error: 'no_download_link' };
+                const pdfLink = document.querySelector('#pdfDown, .btn-dlpdf a');
+                const cajLink = document.querySelector('#cajDown, .btn-dlcaj a');
+                const link = pdfLink || cajLink;
+                const format = pdfLink ? 'PDF' : 'CAJ';
+                return link ? { format, title } : { error: 'no_download_link' };
             }
         """)
-        return result
+
+        if info.get("error"):
+            return {"success": False, "error": info["error"]}
+
+        # Click download and capture the download event
+        try:
+            async with self.page.expect_download(timeout=60000) as dl_info:
+                await self.page.evaluate("""() => {
+                    const link = document.querySelector('#pdfDown, .btn-dlpdf a, #cajDown, .btn-dlcaj a');
+                    if (link) link.click();
+                }""")
+            download = await dl_info.value
+            filename = download.suggested_filename or f"{info['title'][:60]}.{info['format'].lower()}"
+            download_dir = os.environ.get("DOWNLOAD_DIR", os.getcwd())
+            save_path = Path(download_dir) / "downloads" / filename
+            save_path.parent.mkdir(exist_ok=True)
+            await download.save_as(str(save_path))
+            return {"success": True, "format": info["format"], "title": info["title"],
+                    "path": str(save_path), "size": save_path.stat().st_size}
+        except Exception:
+            # Download event not triggered — CNKI opened a new tab instead
+            # This happens when login is required for bar.cnki.net
+            return {"success": False, "error": "download_blocked",
+                    "title": info["title"],
+                    "message": "CNKI 下载服务需要单独登录。请在浏览器中手动完成下载。"}
