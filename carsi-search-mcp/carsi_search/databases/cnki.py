@@ -279,3 +279,36 @@ class CnkiAdapter(BaseAdapter):
         except Exception:
             pass
         return False
+
+    async def download(self, url: str, **kwargs) -> dict:
+        """Click download link on a CNKI paper detail page. Requires login."""
+        await self._navigate(url)
+
+        try:
+            await self.page.wait_for_selector('.brief h1', timeout=15000)
+        except Exception:
+            return {"success": False, "error": "timeout loading page"}
+
+        if await self._check_captcha():
+            return {"success": False, "error": "captcha"}
+
+        result = await self.page.evaluate("""
+            () => {
+                // Check login status
+                const notLogged = document.querySelector('.downloadlink.icon-notlogged')
+                    || document.querySelector('[class*="notlogged"]');
+                if (notLogged)
+                    return { success: false, error: 'not_logged_in' };
+
+                const title = document.querySelector('.brief h1')?.innerText?.trim()
+                    ?.replace(/\\s*网络首发\\s*$/, '') || '';
+
+                const pdfLink = document.querySelector('#pdfDown') || document.querySelector('.btn-dlpdf a');
+                const cajLink = document.querySelector('#cajDown') || document.querySelector('.btn-dlcaj a');
+
+                if (pdfLink) { pdfLink.click(); return { success: true, format: 'PDF', title }; }
+                if (cajLink) { cajLink.click(); return { success: true, format: 'CAJ', title }; }
+                return { success: false, error: 'no_download_link' };
+            }
+        """)
+        return result

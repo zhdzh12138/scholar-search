@@ -122,12 +122,35 @@ async def list_tools() -> list[Tool]:
             }
         ),
         Tool(
+            name="cnki_login",
+            description="Login to CNKI via CARSI (Xidian University off-campus access). Opens browser. Required for PDF/CAJ download.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string", "description": "Xidian student/staff ID (optional if env var set)"},
+                    "password": {"type": "string", "description": "Xidian password (optional if env var set)"},
+                },
+                "required": []
+            }
+        ),
+        Tool(
             name="cnki_detail",
             description="Get full paper metadata from a CNKI paper detail page. No login required.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "CNKI paper detail URL (contains kcms2/article/abstract)"},
+                },
+                "required": ["url"]
+            }
+        ),
+        Tool(
+            name="cnki_download",
+            description="Download a paper PDF/CAJ from CNKI. Requires user to be logged in to CNKI. Opens browser window.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "CNKI paper detail URL"},
                 },
                 "required": ["url"]
             }
@@ -148,7 +171,9 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
         elif name == "status":   result = await handle_status(args)
         elif name == "logout":   result = await handle_logout(args)
         elif name == "cnki_search":  result = await handle_cnki_search(args)
+        elif name == "cnki_login":   result = await handle_cnki_login(args)
         elif name == "cnki_detail":  result = await handle_cnki_detail(args)
+        elif name == "cnki_download": result = await handle_cnki_download(args)
         else: return [TextContent(type="text", text=f"Unknown tool: {name}")]
         elapsed = time.time() - t0
         result[0].text += f"\n\n⏱ {elapsed:.1f}s"
@@ -331,9 +356,17 @@ async def handle_download(args: dict) -> list[TextContent]:
 
     if pdf_b64 and not pdf_b64.startswith('ERROR:') and not pdf_b64.startswith('HTTP '):
         pdf_data = base64.b64decode(pdf_b64)
-        # Save to project_root/downloads/ with paper title as filename
-        project_root = Path(__file__).parent.parent
-        downloads_dir = project_root / "downloads"
+        # Validate PDF header — fetch may return HTML error page with 200 status
+        if pdf_data[:4] != b'%PDF':
+            # Likely an HTML error/login page, not a real PDF
+            snippet = pdf_data[:200].decode('utf-8', errors='replace')
+            await _page.goto(url.replace('getPDF.jsp', 'stamp.jsp'), wait_until="domcontentloaded", timeout=45000)
+            return [TextContent(type="text",
+                text=f"Download failed: response is not a PDF (可能是登录过期或权限不足).\n"
+                     f"Opened page in browser for manual download.\nFirst bytes: {snippet[:100]}")]
+        # Save to downloads/ in the calling project directory
+        download_dir = os.environ.get("DOWNLOAD_DIR") or os.getcwd()
+        downloads_dir = Path(download_dir) / "downloads"
         downloads_dir.mkdir(exist_ok=True)
         if title:
             # Sanitize title for filename: keep alphanumeric, Chinese, spaces, replace others
@@ -386,15 +419,65 @@ async def handle_logout(args: dict) -> list[TextContent]:
 
 # ── CNKI handlers (no CARSI login required) ─────────────────────────
 
+
+async def handle_cnki_login(args: dict) -> list[TextContent]:
+    """Login to CNKI via CARSI off-campus access."""
+    auth = await _ensure_cnki_browser()
+    page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
+
+    username = args.get("username") or os.environ.get("XIDIAN_USERNAME")
+    password = args.get("password") or os.environ.get("XIDIAN_PASSWORD")
+    if not username or not password:
+        return [TextContent(type="text", text="需要学号和密码。")]
+
+    # Direct CARSI URL for CNKI (bypasses fsso.cnki.net autocomplete)
+    carsi_url = (
+        "https://fsso.cnki.net/Shibboleth.sso/Login"
+        "?entityID=https%3A%2F%2Fidp.xidian.edu.cn%2Fidp%2Fshibboleth"
+        "&target=https%3A%2F%2Ffsso.cnki.net%2Fcarsi%2Fsecure"
+    )
+    await page.goto(carsi_url, wait_until="domcontentloaded", timeout=30000)
+    await asyncio.sleep(3)
+
+    # Use CARSI engine (handles IdP + consent pages)
+    if "idp.xidian.edu.cn" in page.url:
+        await auth._handle_cas_login(page, username, password)
+        await asyncio.sleep(1)
+
+    # Handle remaining consent pages
+    for _ in range(5):
+        if "idp.xidian.edu.cn" not in page.url:
+            break
+        await page.evaluate("""() => {
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                cb.checked = true; cb.dispatchEvent(new Event('change', {bubbles:true}));
+            });
+            document.querySelectorAll('button, input[type="submit"]').forEach(b => {
+                if (!(b.textContent||b.value||'').includes('拒绝')) b.click();
+            });
+        }""")
+        await asyncio.sleep(3)
+
+    if "cnki.net" in page.url:
+        await auth.context.storage_state(path=str(CNKI_STATE_FILE))
+        return [TextContent(type="text", text=f"CNKI 校外登录成功！已保存会话。\n页面: {page.url[:100]}")]
+    else:
+        return [TextContent(type="text", text=f"登录流程完成，请检查浏览器。\n页面: {page.url[:100]}")]
+
 _carsiauth_for_cnki = None
+CNKI_STATE_FILE = Path(__file__).parent / ".cnki_state.json"
+
 
 async def _ensure_cnki_browser():
-    """Create a standalone Playwright browser for CNKI (always headed — CNKI blocks headless)."""
+    """Create a standalone Playwright browser for CNKI (always headed — CNKI blocks headless).
+    Restores cookies from previous session if available."""
     global _carsiauth_for_cnki
     if _carsiauth_for_cnki:
         return _carsiauth_for_cnki
     from carsi_search.engine import CarsiAuth
-    _carsiauth_for_cnki = CarsiAuth(headless=False)  # CNKI requires headed mode
+    # Override state file for CNKI
+    CarsiAuth.STATE_FILE = CNKI_STATE_FILE
+    _carsiauth_for_cnki = CarsiAuth(headless=False)
     await _carsiauth_for_cnki.start()
     return _carsiauth_for_cnki
 
@@ -464,6 +547,28 @@ async def handle_cnki_detail(args: dict) -> list[TextContent]:
     if result.get("classification"): text += f"**分类号**: {result['classification']}\n"
     if result.get("isOnlineFirst"): text += "**状态**: 网络首发\n"
     return [TextContent(type="text", text=text or "未提取到详情")]
+
+
+async def handle_cnki_download(args: dict) -> list[TextContent]:
+    auth = await _ensure_cnki_browser()
+    page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
+
+    from carsi_search.databases.cnki import CnkiAdapter
+    adapter = CnkiAdapter(page)
+    result = await adapter.download(args["url"])
+
+    if not result.get("success"):
+        err = result.get("error", "unknown")
+        if err == "captcha":
+            return [TextContent(type="text", text="CNKI 验证码。请在浏览器中手动完成后重试。")]
+        if err == "not_logged_in":
+            return [TextContent(type="text", text="下载需要登录 CNKI。请在浏览器中登录知网账号后重试。")]
+        if err == "no_download_link":
+            return [TextContent(type="text", text="未找到下载链接，可能该论文不提供 PDF/CAJ 下载。")]
+        return [TextContent(type="text", text=f"CNKI download failed: {err}")]
+
+    return [TextContent(type="text",
+        text=f"{result.get('format', '?')} 下载已触发：{result.get('title', '')}\n请在浏览器下载管理器中查看。")]
 
 
 async def main():
