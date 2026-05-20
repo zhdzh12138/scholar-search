@@ -22,6 +22,7 @@ venv/
 
 # CARSI state
 .carsi_state.json
+.cnki_state.json
 carsi.log
 *.pdf
 
