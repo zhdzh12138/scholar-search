@@ -359,7 +359,7 @@ class CnkiAdapter(BaseAdapter):
         return False
 
     async def download(self, url: str, **kwargs) -> dict:
-        """Download PDF from CNKI. Intercepts new tab, follows redirect chain to docdown.cnki.net."""
+        """Open CNKI download page in browser. User completes download manually."""
         await self._navigate(url)
 
         try:
@@ -388,67 +388,11 @@ class CnkiAdapter(BaseAdapter):
         if info.get("error"):
             return {"success": False, "error": info["error"]}
 
-        # Click download — try new tab first, then direct download
-        try:
-            async with self.page.context.expect_page(timeout=10000) as np_info:
-                await self.page.evaluate("""() => {
-                    const link = document.querySelector('#pdfDown, .btn-dlpdf a, #cajDown, .btn-dlcaj a');
-                    if (link) link.click();
-                }""")
-            dl_page = await np_info.value
-            await dl_page.wait_for_load_state("domcontentloaded", timeout=30000)
-            await asyncio.sleep(3)
+        # Click download — opens new tab, user completes in browser
+        await self.page.evaluate("""() => {
+            const link = document.querySelector('#pdfDown, .btn-dlpdf a, #cajDown, .btn-dlcaj a');
+            if (link) link.click();
+        }""")
 
-            # Follow redirect chain: bar.cnki.net → docdown.cnki.net
-            pdf_url = None
-            for _ in range(30):
-                current = dl_page.url
-                if "docdown.cnki.net" in current:
-                    pdf_url = current
-                    break
-                if "login.cnki.net" in current:
-                    return {"success": False, "error": "not_logged_in",
-                            "message": "下载需要先通过 fsso.cnki.net 校外访问登录。请先调用 cnki_login。"}
-                await asyncio.sleep(1)
-
-            if pdf_url:
-                pdf_b64 = await dl_page.evaluate("""async () => {
-                    try {
-                        const resp = await fetch(window.location.href, {credentials: 'include'});
-                        if (!resp.ok) return 'HTTP ' + resp.status;
-                        const buf = await resp.arrayBuffer();
-                        const bytes = new Uint8Array(buf);
-                        let b = '';
-                        for (let i = 0; i < bytes.byteLength; i++) b += String.fromCharCode(bytes[i]);
-                        return btoa(b);
-                    } catch(e) { return 'ERROR:' + e.message; }
-                }""")
-
-                if pdf_b64 and not pdf_b64.startswith(('ERROR', 'HTTP')):
-                    import base64
-                    data = base64.b64decode(pdf_b64)
-                    if data[:4] == b'%PDF':
-                        download_dir = os.environ.get("DOWNLOAD_DIR", os.getcwd())
-                        save_dir = Path(download_dir) / "downloads"
-                        save_dir.mkdir(exist_ok=True)
-                        save_path = save_dir / f"{info['title'][:60]}.pdf"
-                        save_path.write_bytes(data)
-                        return {"success": True, "format": "PDF", "title": info["title"],
-                                "path": str(save_path), "size": len(data)}
-
-        except Exception:
-            # expect_page timed out — try direct download event
-            try:
-                async with self.page.expect_download(timeout=15000) as dl_info:
-                    pass  # download may have already been triggered
-                download = await dl_info.value
-                download_dir = os.environ.get("DOWNLOAD_DIR", os.getcwd())
-                save_path = Path(download_dir) / "downloads" / (download.suggested_filename or f"{info['title'][:60]}.pdf")
-                save_path.parent.mkdir(exist_ok=True)
-                await download.save_as(str(save_path))
-                return {"success": True, "format": info["format"], "title": info["title"],
-                        "path": str(save_path), "size": save_path.stat().st_size}
-            except Exception:
-                pass
-
-        return {"success": False, "error": "download_failed", "title": info["title"]}
+        return {"success": True, "format": info["format"], "title": info["title"],
+                "message": f"已在浏览器中打开 {info['format']} 下载页面。文件将保存到浏览器默认下载目录。"}

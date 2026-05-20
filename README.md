@@ -64,24 +64,27 @@ claude mcp add carsi-search -- python ~/scholar-search/carsi-search-mcp/server.p
 
 ## 功能
 
-| 功能 | 数据源 | 需要安装 |
+| 功能 | 数据源 | 实现方式 |
 |------|--------|---------|
-| 论文搜索 | Semantic Scholar | 无（curl） |
-| 论文详情/引用/推荐 | Semantic Scholar | 无（curl） |
-| 作者搜索 | Semantic Scholar | 无（curl） |
-| 中文论文搜索 | CNKI 知网 | carsi-search-mcp |
-| CNKI 论文详情 | CNKI 知网 | carsi-search-mcp |
-| IEEE PDF 下载 | CARSI 机构访问 | carsi-search-mcp + Playwright |
+| 英文论文搜索/详情/引用 | Semantic Scholar | curl API (Skill) |
+| 作者搜索/论文推荐 | Semantic Scholar | curl API (Skill) |
+| 中文论文搜索/详情 | CNKI 知网 | carsi-mcp (Playwright) |
+| CNKI PDF 下载 | CNKI 知网 | chrome-devtools Skill |
+| CNKI 引用导出/Zotero | CNKI 知网 | chrome-devtools Skill |
+| IEEE PDF 下载 | CARSI 机构访问 | carsi-mcp (Playwright) |
 
 ## 工作流
 
-```
+```text
 搜索 → S2（唯一入口，覆盖中英文）
   │
-  ├─ IEEE 详情/下载 → carsi_detail / carsi_download
+  ├─ IEEE PDF 下载 → carsi_download (Playwright)
   │   └─ 失败 → carsi_login → 重试
   │
-  └─ 中文不足 → cnki_search 补充
+  ├─ CNKI 中文论文 → cnki_search (Playwright)
+  │   └─ CNKI PDF 下载 → /cnki-download (Chrome DevTools)
+  │
+  └─ 引用导出 → /cnki-export (Chrome DevTools)
 ```
 
 ## 项目结构
