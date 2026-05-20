@@ -424,46 +424,40 @@ async def handle_logout(args: dict) -> list[TextContent]:
 
 
 async def handle_cnki_login(args: dict) -> list[TextContent]:
-    """Login to CNKI via 机构登录 → 校外访问 → CARSI."""
-    auth = await _ensure_cnki_browser()
-    page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
+    """CNKI login is no longer needed — uses user's real Chrome session."""
+    return [TextContent(type="text",
+        text="CNKI 使用您真实 Chrome 的登录态，无需单独登录。\n"
+             "请在 Chrome 中登录 CNKI 后直接使用 cnki_search/cnki_detail/cnki_download。")]
 
-    username = args.get("username") or os.environ.get("XIDIAN_USERNAME")
-    password = args.get("password") or os.environ.get("XIDIAN_PASSWORD")
-    if not username or not password:
-        return [TextContent(type="text", text="需要学号和密码。")]
-
-    from carsi_search.databases.cnki import CnkiAdapter
-    adapter = CnkiAdapter(page)
-    result = await adapter.login(username, password, carsi_auth=auth)
-
-    if result.get("success"):
-        await auth.context.storage_state(path=str(CNKI_STATE_FILE))
-        return [TextContent(type="text", text=f"CNKI 机构登录成功！已保存会话。\n页面: {result['url'][:100]}")]
-    else:
-        return [TextContent(type="text", text=f"登录流程完成，请检查浏览器。\n页面: {result['url'][:100]}")]
-
-_carsiauth_for_cnki = None
-CNKI_STATE_FILE = Path(__file__).parent / ".cnki_state.json"
+_cnki_playwright = None
+_cnki_context = None
 
 
 async def _ensure_cnki_browser():
-    """Create a standalone Playwright browser for CNKI (always headed — CNKI blocks headless).
-    Restores cookies from previous session if available."""
-    global _carsiauth_for_cnki
-    if _carsiauth_for_cnki:
-        return _carsiauth_for_cnki
-    from carsi_search.engine import CarsiAuth
-    # Override state file for CNKI
-    CarsiAuth.STATE_FILE = CNKI_STATE_FILE
-    _carsiauth_for_cnki = CarsiAuth(headless=False)
-    await _carsiauth_for_cnki.start()
-    return _carsiauth_for_cnki
+    """Connect to user's real Chrome via CDP (no anti-bot issues).
+    Chrome must be running with --remote-debugging-port=9222."""
+    global _cnki_playwright, _cnki_context
+    if _cnki_context:
+        return _cnki_context
+
+    from playwright.async_api import async_playwright
+    _cnki_playwright = await async_playwright().start()
+    try:
+        browser = await _cnki_playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
+    except Exception as e:
+        await _cnki_playwright.stop()
+        _cnki_playwright = None
+        raise RuntimeError(
+            f"无法连接 Chrome CDP。请先启动 Chrome: chrome --remote-debugging-port=9222\n{e}"
+        )
+
+    _cnki_context = browser.contexts[0] if browser.contexts else await browser.new_context()
+    return _cnki_context
 
 
 async def handle_cnki_search(args: dict) -> list[TextContent]:
-    auth = await _ensure_cnki_browser()
-    page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
+    ctx = await _ensure_cnki_browser()
+    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
     from carsi_search.databases.cnki import CnkiAdapter
     adapter = CnkiAdapter(page)
@@ -500,8 +494,8 @@ async def handle_cnki_search(args: dict) -> list[TextContent]:
 
 
 async def handle_cnki_detail(args: dict) -> list[TextContent]:
-    auth = await _ensure_cnki_browser()
-    page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
+    ctx = await _ensure_cnki_browser()
+    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
     from carsi_search.databases.cnki import CnkiAdapter
     adapter = CnkiAdapter(page)
@@ -529,8 +523,8 @@ async def handle_cnki_detail(args: dict) -> list[TextContent]:
 
 
 async def handle_cnki_download(args: dict) -> list[TextContent]:
-    auth = await _ensure_cnki_browser()
-    page = auth.context.pages[0] if auth.context.pages else await auth.context.new_page()
+    ctx = await _ensure_cnki_browser()
+    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
     from carsi_search.databases.cnki import CnkiAdapter
     adapter = CnkiAdapter(page)
