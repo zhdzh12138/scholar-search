@@ -25,57 +25,80 @@ class CnkiAdapter(BaseAdapter):
     home_url = "https://kns.cnki.net/kns8s/search"
 
     async def login(self, username: str, password: str, carsi_auth=None) -> dict:
-        """Login to CNKI via 机构登录 → 校外访问 → CARSI."""
-        # Navigate to CNKI
+        """Login to CNKI: kns.cnki.net → 机构登录 → 校外访问 → fsso.cnki.net → CARSI IdP.
+        This ensures session cookies are set on the kns.cnki.net domain."""
+        # Step 1: Navigate to kns.cnki.net search page
         await self._navigate(self.home_url)
         await asyncio.sleep(2)
 
-        # Click 机构登录
+        # Step 2: Click 机构登录 (institutional login)
         try:
-            inst_login = self.page.locator('a:has-text("机构登录"), a:has-text("机构馆")').first
-            if await inst_login.count() > 0:
-                await inst_login.click()
+            inst_link = self.page.locator('a:has-text("机构登录"), a:has-text("登录")').first
+            if await inst_link.count() > 0:
+                await inst_link.click()
                 await asyncio.sleep(2)
         except Exception:
             pass
 
-        # Click 校外访问
+        # Step 3: Click 校外访问 (off-campus access) — navigates to fsso.cnki.net
         try:
-            offcampus = self.page.locator('text=校外访问').first
+            offcampus = self.page.locator('a:has-text("校外访问")').first
             if await offcampus.count() > 0:
                 await offcampus.click()
+                await asyncio.sleep(3)
+            else:
+                # Try JS click (element may be hidden)
+                await self.page.evaluate("""() => {
+                    const links = document.querySelectorAll('a');
+                    for (const a of links) {
+                        if (a.textContent?.includes('校外访问')) { a.click(); return; }
+                    }
+                }""")
                 await asyncio.sleep(3)
         except Exception:
             pass
 
-        # Now should be at fsso.cnki.net or IdP
-        current = self.page.url
-        if "idp.xidian.edu.cn" in current and carsi_auth:
-            # Use CARSI engine for IdP login
+        # Step 4: Now on fsso.cnki.net — search for Xidian and trigger CARSI
+        if "fsso" in self.page.url or "cnki.net" in self.page.url:
+            await self.page.evaluate("""() => {
+                const input = document.querySelector('input#o');
+                if (input) {
+                    input.value = "西安电子科技大学";
+                    input.dispatchEvent(new KeyboardEvent('keyup', {key: '学', keyCode: 88, bubbles: true}));
+                }
+            }""")
+            await asyncio.sleep(2)
+            await self.page.evaluate("""() => {
+                const items = document.querySelectorAll('.auto_show div');
+                for (const el of items) {
+                    if (el.textContent?.includes('西安电子科技大学')) { el.click(); return; }
+                }
+            }""")
+            await asyncio.sleep(3)
+
+        # Step 5: Handle CARSI IdP
+        if "idp.xidian.edu.cn" in self.page.url and carsi_auth:
             await carsi_auth._handle_cas_login(self.page, username, password)
             await asyncio.sleep(1)
 
-            # Handle remaining consent pages
-            for _ in range(5):
-                if "idp.xidian.edu.cn" not in self.page.url:
-                    break
-                await self.page.evaluate("""() => {
-                    document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-                        cb.checked = true; cb.dispatchEvent(new Event('change', {bubbles:true}));
-                    });
-                    document.querySelectorAll('button, input[type="submit"]').forEach(b => {
-                        if (!(b.textContent||b.value||'').includes('拒绝')) b.click();
-                    });
-                }""")
-                await asyncio.sleep(3)
+        for _ in range(5):
+            if "idp.xidian.edu.cn" not in self.page.url:
+                break
+            await self.page.evaluate("""() => {
+                document.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+                    cb.checked = true; cb.dispatchEvent(new Event('change', {bubbles:true}));
+                });
+                document.querySelectorAll('button, input[type="submit"]').forEach(b => {
+                    if (!(b.textContent||b.value||'').includes('拒绝')) b.click();
+                });
+            }""")
+            await asyncio.sleep(3)
 
-        # Verify we're logged in on kns.cnki.net (not captcha page)
-        await asyncio.sleep(2)
+        # Step 6: Should redirect back to kns.cnki.net with session
+        await asyncio.sleep(3)
         url = self.page.url
-        if "cnki.net" in url and "verify" not in url:
+        if "cnki.net" in url:
             return {"success": True, "url": url}
-        if "verify" in url:
-            return {"success": True, "url": url, "note": "验证码页面，请在浏览器中手动完成"}
         return {"success": False, "url": url}
     adv_url = "https://kns.cnki.net/kns/AdvSearch?classid=7NS01R8M"
 
@@ -336,7 +359,7 @@ class CnkiAdapter(BaseAdapter):
         return False
 
     async def download(self, url: str, **kwargs) -> dict:
-        """Download PDF from CNKI. Clicks link, Playwright captures the download."""
+        """Download PDF from CNKI. Intercepts new tab, follows redirect chain to docdown.cnki.net."""
         await self._navigate(url)
 
         try:
@@ -365,24 +388,67 @@ class CnkiAdapter(BaseAdapter):
         if info.get("error"):
             return {"success": False, "error": info["error"]}
 
-        # Click download and capture the download event
+        # Click download — try new tab first, then direct download
         try:
-            async with self.page.expect_download(timeout=60000) as dl_info:
+            async with self.page.context.expect_page(timeout=10000) as np_info:
                 await self.page.evaluate("""() => {
                     const link = document.querySelector('#pdfDown, .btn-dlpdf a, #cajDown, .btn-dlcaj a');
                     if (link) link.click();
                 }""")
-            download = await dl_info.value
-            filename = download.suggested_filename or f"{info['title'][:60]}.{info['format'].lower()}"
-            download_dir = os.environ.get("DOWNLOAD_DIR", os.getcwd())
-            save_path = Path(download_dir) / "downloads" / filename
-            save_path.parent.mkdir(exist_ok=True)
-            await download.save_as(str(save_path))
-            return {"success": True, "format": info["format"], "title": info["title"],
-                    "path": str(save_path), "size": save_path.stat().st_size}
+            dl_page = await np_info.value
+            await dl_page.wait_for_load_state("domcontentloaded", timeout=30000)
+            await asyncio.sleep(3)
+
+            # Follow redirect chain: bar.cnki.net → docdown.cnki.net
+            pdf_url = None
+            for _ in range(30):
+                current = dl_page.url
+                if "docdown.cnki.net" in current:
+                    pdf_url = current
+                    break
+                if "login.cnki.net" in current:
+                    return {"success": False, "error": "not_logged_in",
+                            "message": "下载需要先通过 fsso.cnki.net 校外访问登录。请先调用 cnki_login。"}
+                await asyncio.sleep(1)
+
+            if pdf_url:
+                pdf_b64 = await dl_page.evaluate("""async () => {
+                    try {
+                        const resp = await fetch(window.location.href, {credentials: 'include'});
+                        if (!resp.ok) return 'HTTP ' + resp.status;
+                        const buf = await resp.arrayBuffer();
+                        const bytes = new Uint8Array(buf);
+                        let b = '';
+                        for (let i = 0; i < bytes.byteLength; i++) b += String.fromCharCode(bytes[i]);
+                        return btoa(b);
+                    } catch(e) { return 'ERROR:' + e.message; }
+                }""")
+
+                if pdf_b64 and not pdf_b64.startswith(('ERROR', 'HTTP')):
+                    import base64
+                    data = base64.b64decode(pdf_b64)
+                    if data[:4] == b'%PDF':
+                        download_dir = os.environ.get("DOWNLOAD_DIR", os.getcwd())
+                        save_dir = Path(download_dir) / "downloads"
+                        save_dir.mkdir(exist_ok=True)
+                        save_path = save_dir / f"{info['title'][:60]}.pdf"
+                        save_path.write_bytes(data)
+                        return {"success": True, "format": "PDF", "title": info["title"],
+                                "path": str(save_path), "size": len(data)}
+
         except Exception:
-            # Download event not triggered — CNKI opened a new tab instead
-            # This happens when login is required for bar.cnki.net
-            return {"success": False, "error": "download_blocked",
-                    "title": info["title"],
-                    "message": "CNKI 下载服务需要单独登录。请在浏览器中手动完成下载。"}
+            # expect_page timed out — try direct download event
+            try:
+                async with self.page.expect_download(timeout=15000) as dl_info:
+                    pass  # download may have already been triggered
+                download = await dl_info.value
+                download_dir = os.environ.get("DOWNLOAD_DIR", os.getcwd())
+                save_path = Path(download_dir) / "downloads" / (download.suggested_filename or f"{info['title'][:60]}.pdf")
+                save_path.parent.mkdir(exist_ok=True)
+                await download.save_as(str(save_path))
+                return {"success": True, "format": info["format"], "title": info["title"],
+                        "path": str(save_path), "size": save_path.stat().st_size}
+            except Exception:
+                pass
+
+        return {"success": False, "error": "download_failed", "title": info["title"]}
