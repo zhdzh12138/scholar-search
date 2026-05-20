@@ -3,6 +3,10 @@ semantic-scholar-mcp/
 ieee-xplore-mcp/
 library-access-mcp/
 cnki-skills/
+_ref/
+
+# Local Claude Code config
+.claude/
 
 # Python
 __pycache__/
