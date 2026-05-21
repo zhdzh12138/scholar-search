@@ -1,39 +1,21 @@
 #!/usr/bin/env python3
 """
-CARSI Academic Database Search MCP Server
+学术论文搜索下载 MCP Server — IEEE / CNKI / 万方 统一入口。
 
-=== 架构概览 ===
-
-本文件是学术论文搜索 MCP Server 的主入口，提供两大类工具：
-
-1. CARSI 模式 (IEEE / 万方智搜):
-   - 使用 Playwright 启动无头浏览器，通过西安电子科技大学 CARSI 认证登录数据库
-   - 登录成功后保持 session，后续搜索/下载复用同一浏览器实例
-   - Cookie 状态持久化到磁盘，下次启动可自动恢复会话
-   - 下载方式：浏览器内 fetch + base64 解码 → 写入本地文件
-
-2. CNKI 模式 (中国知网):
-   - 通过 CDP (Chrome DevTools Protocol) 连接用户已打开的真实 Chrome 浏览器
-   - 不使用 Playwright 自带浏览器，因为知网有反爬机制会拦截 Playwright
-   - 用户需先用 --remote-debugging-port=9222 启动 Chrome，并在 Chrome 中登录知网
-   - 搜索无需登录，下载需要用户已登录 CNKI
-   - 下载方式：Playwright expect_download 拦截浏览器原生下载
-
-3. S2 模式 (Semantic Scholar):
-   - 不在本文件中实现，由 Skill 层通过 curl 调用 Semantic Scholar API
-   - 详见 skills/scholar/SKILL.md
+所有数据库通过 CDP 连接用户真实 Chrome，自动启动 Chrome（如未运行）。
+用户手动登录一次，cookie 自动保存恢复，无需自动化表单填写。
 
 MCP tools:
-  login         - 通过 CARSI 认证登录学术数据库 (IEEE/万方)
-  search        - 在当前数据库中搜索论文
-  detail        - 获取论文详情 + PDF 链接
-  download      - 下载论文 PDF 到本地
-  status        - 检查会话状态、列出可用数据库
-  logout        - 清除保存的会话
-  cnki_search   - 搜索中国知网论文 (无需登录)
-  cnki_login    - CNKI 登录 (现已为 no-op，使用 Chrome 已有登录态)
-  cnki_detail   - 获取 CNKI 论文详情
-  cnki_download - 从 CNKI 下载 PDF/CAJ (需已在 Chrome 中登录知网)
+  login         - 连接 Chrome 并检测数据库登录状态
+  search        - 搜索论文 (IEEE/万方)
+  detail        - 获取论文详情
+  download      - 下载 PDF (IEEE/万方：JS fetch)
+  status        - CDP 连接状态 + 数据库列表
+  logout        - 断开 CDP（不关闭 Chrome）
+  cnki_search   - 搜索 CNKI
+  cnki_login    - CNKI 登录检测 (no-op，使用 Chrome 已有登录态)
+  cnki_detail   - CNKI 论文详情
+  cnki_download - CNKI PDF/CAJ 下载
 
 添加新数据库: 编辑 registry.py + 在 databases/ 下创建适配器
 """
@@ -55,10 +37,10 @@ from carsi_search.engine import CarsiAuth
 from carsi_search.registry import list_dbs, get_db
 
 # ── MCP Server 实例 ──────────────────────────────────────────────────
-app = Server("carsi-search-mcp")
+app = Server("cnki-ieee-download")
 
 # ── 全局状态 ─────────────────────────────────────────────────────────
-_auth = None        # CarsiAuth 实例，管理 CDP 连接和 CARSI 登录
+_auth = None        # CarsiAuth 实例，管理 CDP 连接
 _page = None        # 当前活跃的 Playwright Page 对象
 _current_db = None  # 当前激活的数据库名称 ("ieee" / "zhizhen")
 
@@ -79,7 +61,7 @@ async def list_tools() -> list[Tool]:
         # 用户需在 Chrome 中手动登录，cookie 自动保存供后续恢复
         Tool(
             name="login",
-            description=f"Connect to Chrome and check login status for a database. Available: {DB_LIST}. User logs in manually in Chrome; cookies are saved automatically for future sessions.",
+            description=f"Connect Chrome via CDP and check login status for a database. Auto-launches Chrome if not running. Available: {DB_LIST}.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -88,11 +70,10 @@ async def list_tools() -> list[Tool]:
                 "required": ["database"]
             }
         ),
-        # search: 在已登录的 CARSI 数据库中搜索论文
-        # 返回标题、作者、摘要、URL 等信息，支持分页
+        # search: 在 IEEE 或 万方 中搜索论文（需先 login 或 cookie 已恢复）
         Tool(
             name="search",
-            description="Search papers in the current database. Returns title, authors, abstract, URL for each paper.",
+            description=f"Search papers in IEEE or Zhizhen. Requires prior login. Available: {DB_LIST}.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -103,8 +84,7 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"]
             }
         ),
-        # detail: 获取论文的完整元数据，包括摘要、作者、DOI、PDF 链接等
-        # 通常在 search 之后调用，传入论文的 URL 获取详情
+        # detail: 获取论文完整元数据
         Tool(
             name="detail",
             description="Get full paper metadata: abstract, authors, affiliation, keywords, DOI, PDF link, citation.",
@@ -117,42 +97,38 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"]
             }
         ),
-        # download: 下载论文 PDF 到项目目录
-        # 对于 CARSI 数据库：通过浏览器 JS fetch + base64 解码保存
-        # 注意：CNKI 有独立的下载处理函数，不走此路径
+        # download: 下载 IEEE/万方 论文 PDF 到 project downloads/
         Tool(
             name="download",
-            description="Download a paper PDF to the project's downloads/ directory with the paper title as filename.",
+            description="Download a paper PDF from IEEE/Zhizhen. Uses browser JS fetch with CARSI cookies. Saves to downloads/.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "Paper detail URL (or direct PDF URL)"},
-                    "title": {"type": "string", "description": "Paper title (used as filename). If omitted, extracted from the page."},
+                    "title": {"type": "string", "description": "Paper title (used as filename)."},
                     "database": {"type": "string", "description": f"Database key. {DB_LIST}"},
                 },
                 "required": ["url"]
             }
         ),
-        # status: 查看当前会话状态，列出所有可用数据库及当前激活的数据库
+        # status: CDP 连接状态 + 数据库列表
         Tool(
             name="status",
-            description="Check session status and list available databases.",
+            description="Check CDP connection status and list available databases.",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
-        # logout: 清除保存的 Cookie 会话，下次操作需要重新登录
+        # logout: 断开 CDP（不关闭 Chrome）
         Tool(
             name="logout",
-            description="Clear saved session cookies.",
+            description="Disconnect CDP connection. Does NOT close Chrome browser.",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
 
-        # ── CNKI 模式工具 ───────────────────────────────────────────
+        # ── CNKI 工具 ───────────────────────────────────────────
         # cnki_search: 搜索中国知网论文
-        # 无需登录即可使用，支持作者/期刊/年份/排序等高级筛选
-        # 通过 CDP 连接用户真实 Chrome，使用 CnkiAdapter 执行搜索
         Tool(
             name="cnki_search",
-            description="Search CNKI (中国知网) for papers. No login required. Supports advanced filters.",
+            description="Search CNKI (中国知网) for papers. Supports advanced filters. Auto-connects Chrome if needed.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -167,26 +143,16 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"]
             }
         ),
-        # cnki_login: CNKI 登录工具
-        # 目前已变为 no-op：CNKI 使用用户 Chrome 浏览器中已有的登录态
-        # 保留此 tool 是为了向后兼容，调用时会提示用户在 Chrome 中登录
+        # cnki_login: no-op，提示用户手动登录
         Tool(
             name="cnki_login",
-            description="Login to CNKI via CARSI (Xidian University off-campus access). Opens browser. Required for PDF/CAJ download.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "username": {"type": "string", "description": "Xidian student/staff ID (optional if env var set)"},
-                    "password": {"type": "string", "description": "Xidian password (optional if env var set)"},
-                },
-                "required": []
-            }
+            description="Check CNKI login status. User logs in manually in Chrome; this tool only checks and reports.",
+            inputSchema={"type": "object", "properties": {}, "required": []}
         ),
-        # cnki_detail: 获取 CNKI 论文的完整元数据
-        # 无需登录，通过 CDP Chrome 访问知网论文详情页
+        # cnki_detail: CNKI 论文详情
         Tool(
             name="cnki_detail",
-            description="Get full paper metadata from a CNKI paper detail page. No login required.",
+            description="Get full paper metadata from a CNKI paper detail page.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -195,13 +161,10 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"]
             }
         ),
-        # cnki_download: 从 CNKI 下载论文 PDF/CAJ
-        # 要求用户已在 Chrome 中登录知网账号
-        # 使用 Playwright expect_download 拦截原生下载，保存到项目 downloads/ 目录
-        # 注意：此工具与 download 工具是完全独立的下载通道
+        # cnki_download: CNKI PDF/CAJ 下载
         Tool(
             name="cnki_download",
-            description="Download a paper PDF/CAJ from CNKI. Requires user to be logged in to CNKI. Opens browser window.",
+            description="Download a paper PDF/CAJ from CNKI. Requires user to be logged in to CNKI in Chrome.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -227,14 +190,14 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
     import time
     t0 = time.time()
     try:
-        # CARSI 模式工具
+        # IEEE/Zhizhen 工具
         if name == "login":    result = await handle_login(args)
         elif name == "search":   result = await handle_search(args)
         elif name == "detail":   result = await handle_detail(args)
         elif name == "download": result = await handle_download(args)
         elif name == "status":   result = await handle_status(args)
         elif name == "logout":   result = await handle_logout(args)
-        # CNKI 模式工具
+        # CNKI 工具
         elif name == "cnki_search":  result = await handle_cnki_search(args)
         elif name == "cnki_login":   result = await handle_cnki_login(args)
         elif name == "cnki_detail":  result = await handle_cnki_detail(args)
@@ -248,7 +211,7 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# CARSI 模式 handler 函数
+# IEEE / Zhizhen handler 函数
 # ══════════════════════════════════════════════════════════════════════
 
 
@@ -605,11 +568,11 @@ async def handle_logout(args: dict) -> list[TextContent]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# CNKI 模式 handler 函数
+# CNKI handler 函数
 #
-# CNKI 和 CARSI 现在共用同一个 CDP 连接（连接用户真实 Chrome）。
-# 知网有反爬虫机制，会检测 Playwright 指纹，所以必须用真实 Chrome。
-# CNKI handler 会在 Chrome 所有 tab 中搜索已有的 cnki.net 页面来复用。
+# CNKI 和 IEEE/Zhizhen 共用同一个 CDP 连接。
+# 知网有反爬机制，必须用真实 Chrome CDP。
+# CNKI handler 首次调用时自动连接 Chrome。
 # ══════════════════════════════════════════════════════════════════════
 
 
