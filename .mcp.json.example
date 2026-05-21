@@ -1,15 +1,9 @@
 {
-  "_comment": "复制此文件为 .mcp.json，填入你的信息。args 路径改为 carsi-search-mcp/server.py 的实际绝对路径。",
+  "_comment": "复制此文件为 .mcp.json。args 路径改为 carsi-search-mcp/server.py 的实际绝对路径。Chrome 会自动启动无需手动配置。",
   "mcpServers": {
     "carsi-search": {
       "command": "python",
-      "args": ["C:/Users/你的用户名/scholar-search/carsi-search-mcp/server.py"],
-      "env": {
-        "XIDIAN_USERNAME": "你的学号",
-        "XIDIAN_PASSWORD": "你的密码",
-        "HEADLESS": "true",
-        "DOWNLOAD_DIR": ""
-      }
+      "args": ["C:/Users/你的用户名/scholar-search/carsi-search-mcp/server.py"]
     }
   }
 }
