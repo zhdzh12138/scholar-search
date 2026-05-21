@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-学术论文搜索下载 MCP Server — IEEE / CNKI / 万方 统一入口。
+学术论文搜索下载 MCP Server — IEEE / CNKI 统一入口。
 
 所有数据库通过 CDP 连接用户真实 Chrome，自动启动 Chrome（如未运行）。
 用户手动登录一次，cookie 自动保存恢复，无需自动化表单填写。
 
 MCP tools:
   login         - 连接 Chrome 并检测数据库登录状态
-  search        - 搜索论文 (IEEE/万方)
+  search        - 搜索论文 (IEEE)
   detail        - 获取论文详情
-  download      - 下载 PDF (IEEE/万方：JS fetch)
+  download      - 下载 PDF (IEEE: JS fetch)
   status        - CDP 连接状态 + 数据库列表
   logout        - 断开 CDP（不关闭 Chrome）
   cnki_search   - 搜索 CNKI
@@ -42,7 +42,7 @@ app = Server("cnki-ieee-download")
 # ── 全局状态 ─────────────────────────────────────────────────────────
 _auth = None        # CarsiAuth 实例，管理 CDP 连接
 _page = None        # 当前活跃的 Playwright Page 对象
-_current_db = None  # 当前激活的数据库名称 ("ieee" / "zhizhen")
+_current_db = None  # 当前激活的数据库名称 ("ieee")
 
 # 从 registry 获取所有已注册数据库的名称列表，用于 tool 描述
 DB_LIST = ", ".join(list_dbs())
@@ -70,10 +70,10 @@ async def list_tools() -> list[Tool]:
                 "required": ["database"]
             }
         ),
-        # search: 在 IEEE 或 万方 中搜索论文（需先 login 或 cookie 已恢复）
+        # search: 在 IEEE 中搜索论文（需先 login 或 cookie 已恢复）
         Tool(
             name="search",
-            description=f"Search papers in IEEE or Zhizhen. Requires prior login. Available: {DB_LIST}.",
+            description=f"Search papers in IEEE. Requires prior login. Available: {DB_LIST}.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -97,10 +97,10 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"]
             }
         ),
-        # download: 下载 IEEE/万方 论文 PDF 到 project downloads/
+        # download: 下载 IEEE 论文 PDF 到 project downloads/
         Tool(
             name="download",
-            description="Download a paper PDF from IEEE/Zhizhen. Uses browser JS fetch with CARSI cookies. Saves to downloads/.",
+            description="Download a paper PDF from IEEE. Uses browser JS fetch with CARSI cookies. Saves to downloads/.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -190,7 +190,7 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
     import time
     t0 = time.time()
     try:
-        # IEEE/Zhizhen 工具
+        # IEEE 工具
         if name == "login":    result = await handle_login(args)
         elif name == "search":   result = await handle_search(args)
         elif name == "detail":   result = await handle_detail(args)
@@ -211,7 +211,7 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# IEEE / Zhizhen handler 函数
+# IEEE handler 函数
 # ══════════════════════════════════════════════════════════════════════
 
 
@@ -267,7 +267,7 @@ async def handle_login(args: dict) -> list[TextContent]:
         try:
             page_text = await page.evaluate("() => document.body.innerText.slice(0, 5000)")
             # CNKI: 页面有"机构登录"/"校外访问"说明未登录
-            # IEEE/Zhizhen: 页面有"Institutional Sign In"说明未登录
+            # IEEE: 页面有"Institutional Sign In"说明未登录
             not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
             has_login_prompt = any(kw in page_text for kw in not_logged_indicators)
             is_logged_in = not has_login_prompt
@@ -284,9 +284,7 @@ async def handle_login(args: dict) -> list[TextContent]:
                  f"Cookie 已保存，下次启动自动恢复。")]
     else:
         return [TextContent(type="text",
-            text=f"❌ 尚未登录 {db_label}。\n"
-                 f"当前 URL: {current_url[:120]}\n\n"
-                 f"请在 Chrome 中手动登录 {db_label}，然后再次调用 login(database=\"{database}\") 检测。")]
+            text=f"🔐 尚未登录 {db_label}。Chrome 窗口已打开，请在 Chrome 中手动登录后让我重试。")]
 
 async def _try_cookie_session(db: str) -> bool:
     """
@@ -363,7 +361,7 @@ async def handle_search(args: dict) -> list[TextContent]:
     if not _auth or not _page:
         if not await _try_cookie_session(db):
             return [TextContent(type="text",
-                text=f"❌ 未登录 {db}。请先在 Chrome 中手动登录，然后使用 login(database=\"{db}\") 检测。")]
+                text=f"🔐 未登录 {db}。Chrome 窗口已打开，请在 Chrome 中手动登录 {db}，然后让我重试。")]
         log.info("[CDP] Session restored from cookies")
 
     result = await _auth.search(_page, db, args["query"], page_num=args.get("page", 1))
@@ -400,12 +398,12 @@ async def handle_detail(args: dict) -> list[TextContent]:
 
     db = args.get("database") or _current_db
     if not _auth or not _page:
-        if not await _try_cookie_session(db or "zhizhen"):
+        if not await _try_cookie_session(db or "ieee"):
             return [TextContent(type="text",
-                text=f"❌ 未登录。请先在 Chrome 中手动登录，然后使用 login(database=\"{db or 'zhizhen'}\") 检测。")]
+                text=f"🔐 未登录。Chrome 窗口已打开，请在 Chrome 中登录后让我重试。")]
         log.info("[CDP] Session restored from cookies")
 
-    result = await _auth.detail(_page, db or "zhizhen", args["url"])
+    result = await _auth.detail(_page, db or "ieee", args["url"])
 
     if not result.get("success"):
         return [TextContent(type="text", text=f"Detail failed: {result.get('error', '')}")]
@@ -452,7 +450,7 @@ async def handle_download(args: dict) -> list[TextContent]:
     if not _auth or not _page:
         if not await _try_cookie_session(db or "ieee"):
             return [TextContent(type="text",
-                text=f"❌ 未登录。请先在 Chrome 中手动登录 {db or 'ieee'}，然后使用 login 工具检测。")]
+                text=f"🔐 未登录 {db or 'ieee'}。Chrome 窗口已打开，请在 Chrome 中登录后让我重试下载。")]
         log.info("[CDP] Session restored from cookies")
 
     url = args["url"]
@@ -460,7 +458,7 @@ async def handle_download(args: dict) -> list[TextContent]:
 
     # 第一步：如果 URL 不是 PDF 直链，先获取论文详情找到 PDF 链接
     if "stamp.jsp" not in url and "/pdf/" not in url and "getPDF.jsp" not in url:
-        detail_result = await _auth.detail(_page, db or "zhizhen", url)
+        detail_result = await _auth.detail(_page, db or "ieee", url)
         if detail_result.get("pdfUrl"):
             url = detail_result["pdfUrl"]
         if not title and detail_result.get("title"):
@@ -570,7 +568,7 @@ async def handle_logout(args: dict) -> list[TextContent]:
 # ══════════════════════════════════════════════════════════════════════
 # CNKI handler 函数
 #
-# CNKI 和 IEEE/Zhizhen 共用同一个 CDP 连接。
+# CNKI 和 IEEE 共用同一个 CDP 连接。
 # 知网有反爬机制，必须用真实 Chrome CDP。
 # CNKI handler 首次调用时自动连接 Chrome。
 # ══════════════════════════════════════════════════════════════════════
@@ -741,7 +739,8 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
     page_text = await page.evaluate("() => document.body.innerText.slice(0, 3000)")
     not_logged = "机构登录" in page_text or "校外访问" in page_text
     if not_logged:
-        return [TextContent(type="text", text="下载需要登录 CNKI。请先在 Chrome 中登录知网账号。")]
+        return [TextContent(type="text",
+            text='🔐 CNKI 未登录。Chrome 窗口已打开，请在 Chrome 中点击"机构登录"登录知网。登录后让我重试下载。')]
 
     # 检查是否出现滑块验证码
     captcha = await page.evaluate("""() => {

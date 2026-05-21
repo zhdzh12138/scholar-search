@@ -6,19 +6,6 @@ import asyncio
 from pathlib import Path
 
 DB_REGISTRY = {
-    "zhizhen": {
-        "name": "zhizhen",
-        "label": "智真/超星发现 (Zhizhen)",
-        "sp_url": (
-            "https://fsso.zhizhen.com/Shibboleth.sso/Login"
-            "?entityID={entity_id_raw}"
-            "&target=https://fsso.zhizhen.com/carsi/secure"
-        ),
-        "home_url": "https://ss.zhizhen.com/",
-        "cookie_accept": [],
-        "target_url_pattern": "**/zhizhen.com/**",
-        "adapter": "carsi_search.databases.zhizhen:ZhizhenAdapter",
-    },
 
     "ieee": {
         "name": "ieee",
