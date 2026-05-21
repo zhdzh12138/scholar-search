@@ -1,9 +1,54 @@
 """
-CNKI (中国知网) database adapter — Playwright (headed mode only).
+CNKI (中国知网) database adapter — CDP mode only.
 
-CNKI's anti-bot blocks headless Playwright. This adapter always uses headed mode.
-The first call may show a captcha that the user must solve in the browser window.
-After that, the session persists and subsequent calls work without interaction.
+=== 为什么不用 Playwright 直接访问 CNKI？===
+CNKI 的反爬系统会检测 Playwright 浏览器（无论 headless 还是有头模式），
+直接跳转到滑块验证页（blockPuzzle）。验证无法自动完成。
+
+=== 解决方案：CDP 连接用户的真实 Chrome ===
+通过 CDP (Chrome DevTools Protocol) 连接用户已打开的 Chrome 浏览器：
+- 用户在自己的 Chrome 中登录 CNKI（机构登录 → 校外访问）
+- 代码通过 `playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")` 连接
+- CNKI 无法检测到自动化（因为是真实浏览器）
+- 搜索、详情、下载全部正常工作
+
+=== 前提条件 ===
+1. Chrome 必须以调试模式启动: chrome --remote-debugging-port=9222
+2. 用户必须在 Chrome 中登录 CNKI
+3. 端口 9222 必须可访问（curl http://127.0.0.1:9222/json/version 验证）
+
+=== 经过验证的 CNKI DOM 选择器 ===
+搜索结果:
+  - 搜索输入框: input.search-input
+  - 搜索按钮: input.search-btn
+  - 结果行: .result-table-list tbody tr
+  - 标题链接: td.name a.fz14
+  - 作者: td.author a.KnowledgeNetLink
+  - 期刊: td.source a
+  - 日期: td.date
+  - 引用数: td.quote
+  - 下载数: td.download
+  - 结果总数: .pagerTitleCell
+  - 翻页输入: input.countPageMark
+  - 验证码: #tcaptcha_transform_dy (getBoundingClientRect().top >= 0 表示可见)
+
+详情页:
+  - 标题: .brief h1 (需去除 "网络首发"/"附视频" 后缀)
+  - 作者: h3.author (第一个是作者，第二个是单位)
+  - 摘要: .abstract-text
+  - 关键词: p.keywords a
+  - 基金: p.funds
+  - 分类号: .clc-code
+  - 期刊: .doc-top a
+  - DOI: .top-tip span a[href*="doi.org"]
+  - 下载: #pdfDown / #cajDown / .btn-dlpdf a / .btn-dlcaj a
+  - 未登录: .downloadlink.icon-notlogged
+
+=== 已知坑 ===
+1. CNKI 搜索页和详情页可能在不同标签页打开（target="_blank"）
+2. 验证码出现后需要用户手动滑块验证
+3. fsso.cnki.net 的学校搜索用 JS 自动补全，需要触发 keyup 事件
+4. CNKI 的 bar.cnki.net 下载服务有独立认证，和 kns.cnki.net 不共享 session
 """
 
 import asyncio
@@ -11,27 +56,42 @@ import urllib.parse
 from .base import BaseAdapter
 
 
-# Sort option IDs on CNKI results page
+# CNKI 搜索结果页的排序按钮 ID 映射
 SORT_MAP = {
-    "relevance": "FFD",
-    "date": "PT",
-    "citations": "CF",
-    "downloads": "DFR",
+    "relevance": "FFD",    # 相关性排序
+    "date": "PT",          # 发表时间
+    "citations": "CF",     # 被引量
+    "downloads": "DFR",    # 下载量
 }
 
 
 class CnkiAdapter(BaseAdapter):
     name = "cnki"
     home_url = "https://kns.cnki.net/kns8s/search"
+    adv_url = "https://kns.cnki.net/kns/AdvSearch?classid=7NS01R8M"
+
+    # ── 登录 ──────────────────────────────────────────────────────
+    # CNKI 登录流程: kns.cnki.net → 机构登录 → 校外访问 → fsso.cnki.net → CARSI IdP
+    # 注意: 此方法在 CDP 模式下通常不需要调用（用户在 Chrome 中手动登录）
+    # 只在 Playwright 新浏览器模式下使用（已被 CDP 模式取代）
 
     async def login(self, username: str, password: str, carsi_auth=None) -> dict:
-        """Login to CNKI: kns.cnki.net → 机构登录 → 校外访问 → fsso.cnki.net → CARSI IdP.
-        This ensures session cookies are set on the kns.cnki.net domain."""
-        # Step 1: Navigate to kns.cnki.net search page
+        """Login to CNKI via 机构登录 → 校外访问 → fsso.cnki.net → CARSI.
+
+        流程:
+        1. 打开 kns.cnki.net
+        2. 点击"机构登录"
+        3. 点击"校外访问" → 跳转到 fsso.cnki.net
+        4. 在 fsso.cnki.net 搜索学校（JS 自动补全）
+        5. CARSI IdP 认证（填写账号密码 + 同意条款）
+        6. 回到 kns.cnki.net
+
+        注意: fsso.cnki.net 的搜索是 JS 自动补全，需要通过 keyup 事件触发。
+        """
         await self._navigate(self.home_url)
         await asyncio.sleep(2)
 
-        # Step 2: Click 机构登录 (institutional login)
+        # 点击"机构登录"
         try:
             inst_link = self.page.locator('a:has-text("机构登录"), a:has-text("登录")').first
             if await inst_link.count() > 0:
@@ -40,14 +100,13 @@ class CnkiAdapter(BaseAdapter):
         except Exception:
             pass
 
-        # Step 3: Click 校外访问 (off-campus access) — navigates to fsso.cnki.net
+        # 点击"校外访问" — 可能是隐藏元素，用 JS click 兜底
         try:
             offcampus = self.page.locator('a:has-text("校外访问")').first
             if await offcampus.count() > 0:
                 await offcampus.click()
                 await asyncio.sleep(3)
             else:
-                # Try JS click (element may be hidden)
                 await self.page.evaluate("""() => {
                     const links = document.querySelectorAll('a');
                     for (const a of links) {
@@ -58,7 +117,8 @@ class CnkiAdapter(BaseAdapter):
         except Exception:
             pass
 
-        # Step 4: Now on fsso.cnki.net — search for Xidian and trigger CARSI
+        # fsso.cnki.net: 搜索学校并选择
+        # 注意: 必须触发 keyup 事件才能激活自动补全，fill() 不够
         if "fsso" in self.page.url or "cnki.net" in self.page.url:
             await self.page.evaluate("""() => {
                 const input = document.querySelector('input#o');
@@ -76,11 +136,12 @@ class CnkiAdapter(BaseAdapter):
             }""")
             await asyncio.sleep(3)
 
-        # Step 5: Handle CARSI IdP
+        # CARSI IdP 认证
         if "idp.xidian.edu.cn" in self.page.url and carsi_auth:
             await carsi_auth._handle_cas_login(self.page, username, password)
             await asyncio.sleep(1)
 
+        # 处理同意条款页面（可能有多轮）
         for _ in range(5):
             if "idp.xidian.edu.cn" not in self.page.url:
                 break
@@ -94,24 +155,30 @@ class CnkiAdapter(BaseAdapter):
             }""")
             await asyncio.sleep(3)
 
-        # Step 6: Should redirect back to kns.cnki.net with session
         await asyncio.sleep(3)
         url = self.page.url
         if "cnki.net" in url:
             return {"success": True, "url": url}
         return {"success": False, "url": url}
-    adv_url = "https://kns.cnki.net/kns/AdvSearch?classid=7NS01R8M"
+
+    # ── 搜索 ──────────────────────────────────────────────────────
 
     async def search(self, query: str, **kwargs) -> dict:
-        """Basic keyword search with optional pagination and sort."""
+        """基础关键词搜索，支持分页和排序。
+
+        如果提供了高级筛选参数（author/journal/year_start/year_end），
+        自动切换到高级搜索页面。
+
+        注意: 搜索输入框的 timeout 设为 90 秒，因为首次可能需要手动过验证码。
+        """
         page_num = kwargs.get("page", 1)
-        sort = kwargs.get("sort")  # "relevance", "date", "citations", "downloads"
+        sort = kwargs.get("sort")
         author = kwargs.get("author")
         journal = kwargs.get("journal")
         year_start = kwargs.get("year_start")
         year_end = kwargs.get("year_end")
 
-        # If advanced filters are provided, use advanced search
+        # 有高级筛选时用 AdvSearch 页面
         if author or journal or year_start or year_end:
             return await self._advanced_search(
                 query, author=author, journal=journal,
@@ -121,7 +188,7 @@ class CnkiAdapter(BaseAdapter):
 
         await self._navigate(self.home_url)
 
-        # Wait for search input
+        # 等搜索框出现（可能需要先过验证码）
         try:
             await self.page.wait_for_selector('input.search-input', timeout=90000)
         except Exception:
@@ -130,11 +197,10 @@ class CnkiAdapter(BaseAdapter):
         if await self._check_captcha():
             return {"success": False, "error": "captcha — 请在浏览器中手动完成滑块验证后重试"}
 
-        # Fill and submit
         await self.page.fill('input.search-input', query)
         await self.page.click('input.search-btn')
 
-        # Wait for results
+        # 等结果加载
         try:
             await self.page.wait_for_function(
                 "document.body.innerText.includes('条结果')", timeout=30000
@@ -147,11 +213,9 @@ class CnkiAdapter(BaseAdapter):
         if await self._check_captcha():
             return {"success": False, "error": "captcha"}
 
-        # Apply sort if specified
         if sort and sort in SORT_MAP:
             await self._apply_sort(SORT_MAP[sort])
 
-        # Navigate to specific page if not first
         if page_num > 1:
             await self._go_to_page(page_num)
 
@@ -159,7 +223,11 @@ class CnkiAdapter(BaseAdapter):
 
     async def _advanced_search(self, query, author=None, journal=None,
                                year_start=None, year_end=None, sort=None) -> dict:
-        """Advanced search with field filters using CNKI old-style interface."""
+        """高级搜索 — 使用 CNKI 的旧版 AdvSearch 界面。
+
+        旧版界面有固定的 input#txt_1_value1 等选择器，比新版更稳定。
+        字段代码: SU=主题, AU=作者, LY=来源, TI=篇名, KY=关键词
+        """
         await self._navigate(self.adv_url)
 
         try:
@@ -170,29 +238,22 @@ class CnkiAdapter(BaseAdapter):
         if await self._check_captcha():
             return {"success": False, "error": "captcha"}
 
-        # Fill subject (主题) field with query
         await self.page.fill('input#txt_1_value1', query)
 
-        # Fill author if provided
         if author:
             try:
-                # Click dropdown to switch field type to author
                 sel = await self.page.query_selector('select#txt_1_special1')
                 if sel:
                     await sel.select_option(value='AU')
                 await self.page.fill('input#txt_1_value1', author)
-                # Need to re-fill subject in a different row
-                # Actually, use the second row for author
                 sel2 = await self.page.query_selector('select#txt_2_special1')
                 if sel2:
                     await sel2.select_option(value='SU')
                 await self.page.fill('input#txt_2_value1', query)
-                # Re-set first row to author
                 await self.page.fill('input#txt_1_value1', author)
             except Exception:
                 pass
 
-        # Fill journal source if provided
         if journal:
             try:
                 sel = await self.page.query_selector('select#txt_2_special1')
@@ -202,7 +263,6 @@ class CnkiAdapter(BaseAdapter):
             except Exception:
                 pass
 
-        # Set date range if provided
         if year_start or year_end:
             try:
                 start = year_start or "1900"
@@ -214,11 +274,9 @@ class CnkiAdapter(BaseAdapter):
             except Exception:
                 pass
 
-        # Submit
         await self.page.click('input.btn-search')
         await asyncio.sleep(2)
 
-        # Wait for results
         try:
             await self.page.wait_for_function(
                 "document.body.innerText.includes('条结果') || document.body.innerText.includes('找到')",
@@ -238,7 +296,7 @@ class CnkiAdapter(BaseAdapter):
         return await self._extract_results()
 
     async def _apply_sort(self, sort_id: str):
-        """Click sort option on results page."""
+        """点击排序按钮并等待结果刷新。"""
         try:
             await self.page.click(f'a#{sort_id}')
             await self.page.wait_for_function(
@@ -249,7 +307,7 @@ class CnkiAdapter(BaseAdapter):
             pass
 
     async def _go_to_page(self, page_num: int):
-        """Navigate to a specific page number."""
+        """跳转到指定页码。CNKI 的页码输入框是 input.countPageMark。"""
         try:
             page_input = await self.page.query_selector('input.countPageMark')
             if page_input:
@@ -263,7 +321,16 @@ class CnkiAdapter(BaseAdapter):
             pass
 
     async def _extract_results(self) -> dict:
-        """Extract search results from current page."""
+        """从搜索结果页提取论文列表。
+
+        返回格式:
+        {
+            "success": true,
+            "total": "10,318",
+            "page": "1/300",
+            "papers": [{"title": "...", "url": "...", "authors": "...", ...}]
+        }
+        """
         result = await self.page.evaluate("""
             () => {
                 const rows = document.querySelectorAll('.result-table-list tbody tr');
@@ -292,7 +359,15 @@ class CnkiAdapter(BaseAdapter):
         """)
         return result
 
+    # ── 详情 ──────────────────────────────────────────────────────
+
     async def detail(self, url: str, **kwargs) -> dict:
+        """获取论文详情页完整元数据。
+
+        详情页结构: .brief 容器内包含所有信息。
+        作者和单位都在 h3.author 中（第一个是作者，第二个是单位）。
+        标题需要去除 "网络首发" 和 "附视频" 后缀。
+        """
         await self._navigate(url)
 
         try:
@@ -309,10 +384,12 @@ class CnkiAdapter(BaseAdapter):
                 const brief = document.querySelector('.brief');
                 if (!brief) return { success: false, error: 'Paper detail section not found' };
 
+                // 标题: 去除后缀
                 const title = (brief.querySelector('h1')?.innerText?.trim() || '')
                     .replace(/\\s*附视频\\s*$/, '')
                     .replace(/\\s*网络首发\\s*$/, '');
 
+                // 作者: 第一个 h3.author 是作者，第二个是单位
                 const authorH3s = brief.querySelectorAll('h3.author');
                 const authors = [];
                 if (authorH3s[0]) {
@@ -347,7 +424,14 @@ class CnkiAdapter(BaseAdapter):
         """)
         return result
 
+    # ── 辅助方法 ──────────────────────────────────────────────────
+
     async def _check_captcha(self) -> bool:
+        """检查腾讯滑块验证码是否显示。
+
+        #tcaptcha_transform_dy 元素在页面加载时就存在但隐藏在 top:-1000000px。
+        只有当 top >= 0 时才是真正的验证码弹窗。
+        """
         try:
             el = await self.page.query_selector('#tcaptcha_transform_dy')
             if el:
@@ -358,8 +442,18 @@ class CnkiAdapter(BaseAdapter):
             pass
         return False
 
+    # ── 下载 ──────────────────────────────────────────────────────
+    # 注意: 此 download 方法只在非 CDP 模式下使用。
+    # CDP 模式下，下载由 server.py 的 handle_cnki_download() 处理，
+    # 它使用 page.expect_download() 捕获下载事件并保存到项目目录。
+
     async def download(self, url: str, **kwargs) -> dict:
-        """Open CNKI download page in browser. User completes download manually."""
+        """打开 CNKI 下载页面。用户在浏览器中手动完成下载。
+
+        注意: CNKI 的下载链接会打开新标签页（bar.cnki.net → docdown.cnki.net），
+        Playwright 的 expect_download 在某些情况下无法捕获。
+        所以此方法只点击链接，不负责保存文件。
+        """
         await self._navigate(url)
 
         try:
@@ -388,7 +482,6 @@ class CnkiAdapter(BaseAdapter):
         if info.get("error"):
             return {"success": False, "error": info["error"]}
 
-        # Click download — opens new tab, user completes in browser
         await self.page.evaluate("""() => {
             const link = document.querySelector('#pdfDown, .btn-dlpdf a, #cajDown, .btn-dlcaj a');
             if (link) link.click();
