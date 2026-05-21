@@ -17,7 +17,6 @@ class IeeeAdapter(BaseAdapter):
             "https://ieeexplore.ieee.org/search/searchresult.jsp?"
             f"newsearch=true&queryText={quote(query)}"
         )
-        await self._enable_fast_route()
         await self._navigate(search_url)
         await asyncio.sleep(4)
 
@@ -64,7 +63,6 @@ class IeeeAdapter(BaseAdapter):
         return result
 
     async def detail(self, url: str, **kwargs) -> dict:
-        await self._enable_fast_route()
         await self._navigate(url)
 
         try:

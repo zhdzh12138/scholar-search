@@ -58,8 +58,8 @@ from carsi_search.registry import list_dbs, get_db
 app = Server("carsi-search-mcp")
 
 # ── 全局状态 ─────────────────────────────────────────────────────────
-_auth = None        # CarsiAuth 实例，管理 Playwright 浏览器和 CARSI 登录
-_page = None        # 当前活跃的 Playwright Page 对象 (CARSI 模式)
+_auth = None        # CarsiAuth 实例，管理 CDP 连接和 CARSI 登录
+_page = None        # 当前活跃的 Playwright Page 对象
 _current_db = None  # 当前激活的数据库名称 ("ieee" / "zhizhen")
 
 # 从 registry 获取所有已注册数据库的名称列表，用于 tool 描述
@@ -74,21 +74,16 @@ DB_LIST = ", ".join(list_dbs())
 async def list_tools() -> list[Tool]:
     """注册所有 MCP 工具。每个 Tool 定义了名称、描述和参数 schema。"""
     return [
-        # ── CARSI 模式工具 ──────────────────────────────────────────
-        # login: 通过 CARSI (中国教育网联邦认证) 登录到学术数据库
-        # 适用场景：首次使用 IEEE 或万方智搜时需要先登录
-        # 登录后 session 会持久化到磁盘，下次启动可自动恢复
+        # ── 统一 CDP 工具 ──────────────────────────────────────────
+        # login: 连接 Chrome 并检测数据库登录状态
+        # 用户需在 Chrome 中手动登录，cookie 自动保存供后续恢复
         Tool(
             name="login",
-            description=f"Login to an academic database via CARSI (Xidian University). Available: {DB_LIST}. Username/password are optional if XIDIAN_USERNAME/XIDIAN_PASSWORD env vars are set.",
+            description=f"Connect to Chrome and check login status for a database. Available: {DB_LIST}. User logs in manually in Chrome; cookies are saved automatically for future sessions.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "database": {"type": "string", "description": f"Database key: {DB_LIST}"},
-                    "username": {"type": "string", "description": "Xidian student/staff ID"},
-                    "password": {"type": "string", "description": "Xidian unified auth password"},
-                    "headless": {"type": "boolean", "description": "Headless mode", "default": False},
-                    "force": {"type": "boolean", "description": "Force re-login", "default": False},
                 },
                 "required": ["database"]
             }
@@ -259,10 +254,15 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
 
 async def handle_login(args: dict) -> list[TextContent]:
     """
-    CARSI 登录处理。
-    流程：创建 CarsiAuth 实例 → 启动 Playwright 浏览器 → 通过 CARSI 联邦认证登录指定数据库。
-    登录成功后，_page 和 _current_db 会保存在全局变量中供后续工具使用。
-    支持 force=True 强制重新登录（清除旧 session）。
+    连接 Chrome 并检测数据库登录状态。
+    不再自动填写表单 — 用户需在 Chrome 中手动登录，cookie 会自动保存供后续使用。
+
+    流程：
+    1. 通过 CDP 连接用户真实 Chrome（如果尚未连接）
+    2. 如果有已保存的 cookie，自动注入
+    3. 导航到目标数据库，检测是否已登录
+    4. 已登录 → 保存 cookie，设置全局状态
+    5. 未登录 → 提示用户在 Chrome 中手动登录，然后重试
     """
     global _auth, _page, _current_db
 
@@ -270,64 +270,117 @@ async def handle_login(args: dict) -> list[TextContent]:
     if database not in list_dbs():
         return [TextContent(type="text", text=f"Unknown database: {database}. Available: {DB_LIST}")]
 
-    # 获取凭证：优先使用参数传入，其次读取环境变量
-    username = args.get("username") or os.environ.get("XIDIAN_USERNAME")
-    password = args.get("password") or os.environ.get("XIDIAN_PASSWORD")
-    headless = args.get("headless")
-    if headless is None:
-        headless = os.environ.get("HEADLESS", os.environ.get("headless", "false")).lower() in ("true", "1", "yes")
+    # 连接 Chrome CDP
+    if not _auth or not _auth.context:
+        _auth = CarsiAuth()
+        try:
+            await _auth.start()
+        except RuntimeError as e:
+            return [TextContent(type="text", text=str(e))]
 
-    # force=True 时清除旧的 cookie 状态文件
-    if args.get("force") and _auth:
-        await _auth.clear_state()
+    ctx = _auth.context
+    db_config = get_db(database)
+    db_label = db_config["label"]
+    home_url = db_config["home_url"]
+    target_domain = home_url.split("/")[2]
 
-    if not username or not password:
-        return [TextContent(type="text",
-            text="Need username+password. Pass as params or set XIDIAN_USERNAME/XIDIAN_PASSWORD env vars.")]
+    # 查找已有的目标数据库标签页，或打开新页
+    page = None
+    for p in ctx.pages:
+        if target_domain in p.url and "login" not in p.url.lower():
+            page = p
+            break
+    if not page:
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        await page.goto(home_url, wait_until="domcontentloaded", timeout=30000)
 
-    # 如果已有旧实例，先关闭再创建新的
-    if _auth:
-        try: await _auth.stop()
-        except Exception: pass
+    # 检测登录状态：先检查 URL 是否在登录页面，再检查页面内容
+    current_url = page.url
+    is_on_login_page = any(kw in current_url.lower() for kw in ["login", "wayf", "cas", "authserver"])
 
-    _auth = CarsiAuth(headless=headless)
-    await _auth.start()
+    is_logged_in = False
+    if not is_on_login_page and target_domain in current_url:
+        # 根据数据库类型检查页面上的未登录标识
+        try:
+            page_text = await page.evaluate("() => document.body.innerText.slice(0, 5000)")
+            # CNKI: 页面有"机构登录"/"校外访问"说明未登录
+            # IEEE/Zhizhen: 页面有"Institutional Sign In"说明未登录
+            not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
+            has_login_prompt = any(kw in page_text for kw in not_logged_indicators)
+            is_logged_in = not has_login_prompt
+        except Exception:
+            is_logged_in = True
 
-    result = await _auth.login(database, username, password)
-    if result["success"]:
-        _page = result["page"]
+    if is_logged_in:
+        _page = page
         _current_db = database
-        db_label = get_db(database)["label"]
-        return [TextContent(type="text", text=f"Logged into {db_label}. {result.get('message', '')}")]
+        await _auth.save_state()
+        return [TextContent(type="text",
+            text=f"✅ 已连接 {db_label}。\n"
+                 f"URL: {current_url[:120]}\n"
+                 f"Cookie 已保存，下次启动自动恢复。")]
     else:
-        return [TextContent(type="text", text=f"Login failed: {result.get('error', '')}")]
-
+        return [TextContent(type="text",
+            text=f"❌ 尚未登录 {db_label}。\n"
+                 f"当前 URL: {current_url[:120]}\n\n"
+                 f"请在 Chrome 中手动登录 {db_label}，然后再次调用 login(database=\"{database}\") 检测。")]
 
 async def _try_cookie_session(db: str) -> bool:
     """
-    尝试从磁盘恢复已保存的 Cookie 会话，避免重复登录。
+    尝试通过 CDP 连接 + 已保存的 cookie 恢复会话。
 
     流程：
-    1. 检查 CarsiAuth.STATE_FILE 是否存在且有内容（>50 字节）
-    2. 如果存在，创建新的 CarsiAuth 实例并用空凭证调用 login()
-    3. CarsiAuth 内部会尝试用保存的 Cookie 恢复会话
-    4. 成功则设置全局变量并返回 True，失败则关闭实例返回 False
-
-    用在 search/detail/download 中，当 _auth 为空时自动调用。
+    1. 创建 CarsiAuth 实例并通过 CDP 连接用户 Chrome
+    2. 自动注入已保存的 cookie（如果存在）
+    3. 导航到目标数据库，检查是否已登录
+    4. 成功则设置全局变量并返回 True
     """
     global _auth, _page, _current_db
     from carsi_search.engine import CarsiAuth
-    if not CarsiAuth.STATE_FILE.exists() or CarsiAuth.STATE_FILE.stat().st_size <= 50:
+    auth = CarsiAuth()
+    try:
+        await auth.start()
+    except RuntimeError:
         return False
-    headless = os.environ.get("HEADLESS", os.environ.get("headless", "true")).lower() in ("true", "1", "yes")
-    auth = CarsiAuth(headless=headless)
-    await auth.start()
-    result = await auth.login(db, "", "")
-    if result["success"]:
+
+    ctx = auth.context
+    from carsi_search.registry import get_db as _get_db
+    db_config = _get_db(db)
+    if not db_config:
+        await auth.stop()
+        return False
+
+    target_domain = db_config["home_url"].split("/")[2]
+    # 查找已有标签页
+    page = None
+    for p in ctx.pages:
+        if target_domain in p.url and "login" not in p.url.lower():
+            page = p
+            break
+    if not page:
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        await page.goto(db_config["home_url"], wait_until="domcontentloaded", timeout=30000)
+
+    # 检查是否已登录：URL 不在登录页 + 页面无未登录标识
+    url = page.url
+    if (target_domain in url
+            and "login" not in url.lower()
+            and "wayf" not in url.lower()
+            and "cas" not in url.lower()):
+        # 检查页面上的未登录标识
+        try:
+            page_text = await page.evaluate("() => document.body.innerText.slice(0, 5000)")
+            not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
+            if any(kw in page_text for kw in not_logged_indicators):
+                await auth.stop()
+                return False
+        except Exception:
+            pass
         _auth = auth
-        _page = result["page"]
+        _page = page
         _current_db = db
         return True
+
     await auth.stop()
     return False
 
@@ -346,8 +399,9 @@ async def handle_search(args: dict) -> list[TextContent]:
     # 如果没有活跃的浏览器会话，尝试从 Cookie 恢复
     if not _auth or not _page:
         if not await _try_cookie_session(db):
-            return [TextContent(type="text", text="Not logged in. Use login tool first.")]
-        log.info("[CARSI] Session restored from cookies")
+            return [TextContent(type="text",
+                text=f"❌ 未登录 {db}。请先在 Chrome 中手动登录，然后使用 login(database=\"{db}\") 检测。")]
+        log.info("[CDP] Session restored from cookies")
 
     result = await _auth.search(_page, db, args["query"], page_num=args.get("page", 1))
 
@@ -384,8 +438,9 @@ async def handle_detail(args: dict) -> list[TextContent]:
     db = args.get("database") or _current_db
     if not _auth or not _page:
         if not await _try_cookie_session(db or "zhizhen"):
-            return [TextContent(type="text", text="Not logged in.")]
-        log.info("[CARSI] Session restored from cookies")
+            return [TextContent(type="text",
+                text=f"❌ 未登录。请先在 Chrome 中手动登录，然后使用 login(database=\"{db or 'zhizhen'}\") 检测。")]
+        log.info("[CDP] Session restored from cookies")
 
     result = await _auth.detail(_page, db or "zhizhen", args["url"])
 
@@ -426,15 +481,16 @@ async def handle_download(args: dict) -> list[TextContent]:
 
     === 重要警告 ===
     CNKI 的下载有独立的处理函数 handle_cnki_download()，不走此路径。
-    因为 CNKI 使用 CDP 连接用户真实 Chrome，而 CARSI 模式用的是 Playwright 自带浏览器。
+    所有数据库共用同一个 CDP 连接（用户真实 Chrome）。
     """
     global _auth, _page, _current_db
 
     db = args.get("database") or _current_db
     if not _auth or not _page:
         if not await _try_cookie_session(db or "ieee"):
-            return [TextContent(type="text", text="Not logged in.")]
-        log.info("[CARSI] Session restored from cookies")
+            return [TextContent(type="text",
+                text=f"❌ 未登录。请先在 Chrome 中手动登录 {db or 'ieee'}，然后使用 login 工具检测。")]
+        log.info("[CDP] Session restored from cookies")
 
     url = args["url"]
     title = args.get("title", "")
@@ -447,6 +503,13 @@ async def handle_download(args: dict) -> list[TextContent]:
         if not title and detail_result.get("title"):
             title = detail_result["title"]
 
+    # IEEE 回退：如果 detail 没找到 pdfUrl，从 arnumber 构建
+    if "/document/" in url and "getPDF" not in url:
+        import re as _re
+        m = _re.search(r'/document/(\d+)', url)
+        if m:
+            url = f"https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={m.group(1)}"
+
     # 第二步：将 IEEE stamp.jsp 转换为 getPDF.jsp 直接下载端点
     if "stamp.jsp" in url:
         arnumber = url.split("arnumber=")[-1] if "arnumber=" in url else ""
@@ -454,8 +517,6 @@ async def handle_download(args: dict) -> list[TextContent]:
             url = f"https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={arnumber}"
 
     # 第三步：通过浏览器 JS fetch 下载 PDF（利用浏览器已有的认证 Cookie）
-    # 先清除所有路由拦截，避免干扰 fetch 请求
-    await _page.unroute("**/*")
     import base64, re
     pdf_b64 = await _page.evaluate(f"""
         async () => {{
@@ -484,12 +545,9 @@ async def handle_download(args: dict) -> list[TextContent]:
                 text=f"Download failed: response is not a PDF (可能是登录过期或权限不足).\n"
                      f"Opened page in browser for manual download.\nFirst bytes: {snippet[:100]}")]
         # 第五步：保存 PDF 到本地
-        # DOWNLOAD_DIR 环境变量控制下载目录，在 .mcp.json 中配置
-        download_dir = os.environ.get("DOWNLOAD_DIR", "")
-        if not download_dir:
-            # Fallback: try to use the directory where the MCP was invoked
-            download_dir = os.getcwd()
-        downloads_dir = Path(download_dir) / "downloads"
+        # 下载到项目根目录下的 downloads/ 文件夹（Scholar_search/downloads/）
+        project_root = Path(__file__).parent.parent
+        downloads_dir = project_root / "downloads"
         downloads_dir.mkdir(exist_ok=True)
         if title:
             # 文件名安全处理：移除非法字符，限制长度
@@ -511,7 +569,7 @@ async def handle_download(args: dict) -> list[TextContent]:
 
 
 async def handle_status(args: dict) -> list[TextContent]:
-    """显示当前会话状态：已注册的数据库列表、当前激活的数据库、Cookie 文件状态。"""
+    """显示当前会话状态：已注册的数据库列表、当前激活的数据库、CDP 连接状态。"""
     global _auth, _page, _current_db
 
     lines = [f"**Registered databases**: {DB_LIST}"]
@@ -520,111 +578,75 @@ async def handle_status(args: dict) -> list[TextContent]:
         marker = " < active" if name == _current_db else ""
         lines.append(f"  - `{name}`: {db['label']}{marker}")
 
-    if _current_db:
-        lines.append(f"\nActive: {_current_db}")
+    if _auth and _auth.context:
+        lines.append(f"\nCDP 连接: 已连接")
+        if _current_db:
+            lines.append(f"Active: {_current_db}")
         if _page:
             lines.append(f"URL: {_page.url[:100]}")
     else:
-        lines.append("\nNot logged in. Use login tool.")
+        lines.append("\nCDP 连接: 未连接。使用 login 工具连接。")
 
-    lines.append(f"\nCookie file: {'exists' if CarsiAuth.STATE_FILE.exists() else 'none'} (reusable)")
     return [TextContent(type="text", text="\n".join(lines))]
 
 
 async def handle_logout(args: dict) -> list[TextContent]:
-    """清除 CARSI 会话：删除持久化 Cookie，重置全局状态。"""
+    """断开 CDP 连接，重置全局状态。不会关闭用户的真实 Chrome 浏览器。"""
     global _auth, _page, _current_db
 
-    if _auth: await _auth.clear_state()
+    if _auth:
+        await _auth.clear_state()
+        try: await _auth.stop()
+        except Exception: pass
     _auth = None
     _page = None
     _current_db = None
-    return [TextContent(type="text", text="Session cleared. Next login requires credentials.")]
+    return [TextContent(type="text", text="已断开 CDP 连接。Chrome 浏览器保持打开，下次使用需重新连接。")]
 
 
 # ══════════════════════════════════════════════════════════════════════
 # CNKI 模式 handler 函数
 #
-# CNKI 使用与 CARSI 完全不同的浏览器连接方式：
-# - CARSI 模式：Playwright 启动自己的无头浏览器
-# - CNKI 模式：通过 CDP 连接用户已打开的真实 Chrome 浏览器
-#
-# 原因：知网有严格的反爬虫机制，会检测 Playwright 的指纹特征并拦截请求。
-# 通过 CDP 连接用户的真实 Chrome 可以完全绕过此限制。
+# CNKI 和 CARSI 现在共用同一个 CDP 连接（连接用户真实 Chrome）。
+# 知网有反爬虫机制，会检测 Playwright 指纹，所以必须用真实 Chrome。
+# CNKI handler 会在 Chrome 所有 tab 中搜索已有的 cnki.net 页面来复用。
 # ══════════════════════════════════════════════════════════════════════
 
 
 async def handle_cnki_login(args: dict) -> list[TextContent]:
     """
-    CNKI 登录 —— 现已变为 no-op（空操作）。
+    CNKI 登录 —— no-op（空操作）。
 
-    历史说明：最初 CNKI 登录也走 CARSI 认证流程，但后来发现知网会拦截 Playwright。
-    改用 CDP 连接用户真实 Chrome 后，登录状态直接使用 Chrome 中已有的会话，
-    不再需要单独登录。保留此 tool 是为了向后兼容。
-
-    用户只需在 Chrome 中手动登录 CNKI 即可使用 cnki_download。
+    所有数据库（包括 CNKI）都通过 CDP 连接用户真实 Chrome，登录状态直接使用 Chrome 中已有的会话。
+    用户只需在 Chrome 中手动登录 CNKI 即可使用 cnki_search/cnki_detail/cnki_download。
     """
     return [TextContent(type="text",
-        text="CNKI 使用您真实 Chrome 的登录态，无需单独登录。\n"
+        text="所有数据库统一使用 CDP 连接真实 Chrome 的登录态，无需单独登录。\n"
              "请在 Chrome 中登录 CNKI 后直接使用 cnki_search/cnki_detail/cnki_download。")]
-
-
-# CNKI 模式的 Playwright 实例和浏览器上下文（与 CARSI 模式的 _auth/_page 独立）
-_cnki_playwright = None   # Playwright 实例，用于 CDP 连接
-_cnki_context = None      # BrowserContext，通过 CDP 获取
-
-
-async def _ensure_cnki_browser():
-    """
-    确保 CNKI 浏览器连接已建立。
-
-    === 为什么用 CDP 而不是 Playwright 自带浏览器？ ===
-    知网 (CNKI) 有严格的反爬虫机制，会检测 Playwright 的浏览器指纹特征。
-    使用 Playwright launch_browser() 启动的浏览器会被知网识别为自动化工具，
-    导致：搜索时弹验证码、下载链接不可用、甚至封禁 IP。
-    通过 CDP 连接用户已打开的真实 Chrome 浏览器可以完全绕过此限制，
-    因为从知网的角度看，这就是一个正常的用户在浏览。
-
-    === 启动要求 ===
-    Chrome 必须使用以下命令启动：
-      chrome --remote-debugging-port=9222
-    如果不带此参数启动 Chrome，本函数会抛出异常并提示用户。
-
-    === 连接流程 ===
-    1. 调用 Playwright 的 connect_over_cdp 连接到 127.0.0.1:9222
-    2. 获取已有的 BrowserContext（复用 Chrome 的 session/Cookie）
-    3. 如果没有 context 则创建新的（通常不会走到这里）
-    """
-    global _cnki_playwright, _cnki_context
-    # 如果已有连接，直接复用
-    if _cnki_context:
-        return _cnki_context
-
-    from playwright.async_api import async_playwright
-    _cnki_playwright = await async_playwright().start()
-    try:
-        # 通过 CDP 连接到用户本地 Chrome（需要 --remote-debugging-port=9222）
-        browser = await _cnki_playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
-    except Exception as e:
-        # 连接失败，通常是 Chrome 没有开启远程调试端口
-        await _cnki_playwright.stop()
-        _cnki_playwright = None
-        raise RuntimeError(
-            f"无法连接 Chrome CDP。请先启动 Chrome: chrome --remote-debugging-port=9222\n{e}"
-        )
-
-    # 复用 Chrome 已有的 context（包含用户的 Cookie 和登录状态）
-    _cnki_context = browser.contexts[0] if browser.contexts else await browser.new_context()
-    return _cnki_context
 
 
 async def handle_cnki_search(args: dict) -> list[TextContent]:
     """
-    CNKI 论文搜索。通过 CDP Chrome 打开知网搜索页，使用 CnkiAdapter 解析结果。
+    CNKI 论文搜索。通过 CDP 连接用户真实 Chrome，打开知网搜索页，使用 CnkiAdapter 解析结果。
     搜索无需登录，但遇到验证码时需要用户在浏览器中手动完成。
     """
-    ctx = await _ensure_cnki_browser()
-    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+    global _auth
+    if not _auth or not _auth.context:
+        from carsi_search.engine import CarsiAuth
+        _auth = CarsiAuth()
+        try:
+            await _auth.start()
+        except RuntimeError as e:
+            return [TextContent(type="text", text=str(e))]
+    ctx = _auth.context
+    # 查找已有的 CNKI 标签页复用，避免重复打开
+    page = None
+    for p in ctx.pages:
+        if 'cnki.net' in p.url:
+            page = p
+            break
+    if not page:
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
     from carsi_search.databases.cnki import CnkiAdapter
     adapter = CnkiAdapter(page)
@@ -662,11 +684,26 @@ async def handle_cnki_search(args: dict) -> list[TextContent]:
 
 async def handle_cnki_detail(args: dict) -> list[TextContent]:
     """
-    获取 CNKI 论文详情。通过 CDP Chrome 访问论文详情页，提取完整元数据。
+    获取 CNKI 论文详情。通过 CDP 连接用户真实 Chrome，访问论文详情页，提取完整元数据。
     无需登录，但遇到验证码时需要用户手动处理。
     """
-    ctx = await _ensure_cnki_browser()
-    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+    global _auth
+    if not _auth or not _auth.context:
+        from carsi_search.engine import CarsiAuth
+        _auth = CarsiAuth()
+        try:
+            await _auth.start()
+        except RuntimeError as e:
+            return [TextContent(type="text", text=str(e))]
+    ctx = _auth.context
+    # 查找已有的 CNKI 标签页复用
+    page = None
+    for p in ctx.pages:
+        if 'cnki.net' in p.url:
+            page = p
+            break
+    if not page:
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
     from carsi_search.databases.cnki import CnkiAdapter
     adapter = CnkiAdapter(page)
@@ -698,7 +735,7 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
     CNKI 论文 PDF/CAJ 下载。
 
     === 下载流程 ===
-    1. 通过 CDP 连接用户真实 Chrome，查找或复用 CNKI 标签页
+    1. 通过共享的 CDP 连接访问用户真实 Chrome，查找或复用 CNKI 标签页
     2. 导航到论文详情页，等待页面加载
     3. 检查登录状态：如果用户未登录知网，提示先在 Chrome 中登录
     4. 检查验证码：如果出现滑块验证码，提示用户手动完成
@@ -706,12 +743,17 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
     6. 使用 Playwright 的 expect_download 拦截浏览器原生下载事件
     7. 将下载的文件保存到 DOWNLOAD_DIR/downloads/ 目录
 
-    === 重要警告 ===
-    - CNKI 会拦截 Playwright 自带浏览器，必须通过 CDP 连接用户真实 Chrome
-    - 用户必须在 Chrome 中已登录 CNKI，否则无法下载
-    - 用户必须已用 --remote-debugging-port=9222 启动 Chrome
+    注意：用户必须在 Chrome 中已登录 CNKI，否则无法下载。
     """
-    ctx = await _ensure_cnki_browser()
+    global _auth
+    if not _auth or not _auth.context:
+        from carsi_search.engine import CarsiAuth
+        _auth = CarsiAuth()
+        try:
+            await _auth.start()
+        except RuntimeError as e:
+            return [TextContent(type="text", text=str(e))]
+    ctx = _auth.context
     # 查找已有的 CNKI 标签页复用，避免重复打开
     page = None
     for p in ctx.pages:
@@ -732,10 +774,9 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
         pass
     await asyncio.sleep(1)
 
-    # 检查登录状态：通过页面上的 "未登录" 样式类名判断
-    not_logged = await page.evaluate(
-        "() => !!document.querySelector('.downloadlink.icon-notlogged, [class*=\"notlogged\"]')"
-    )
+    # 检查登录状态：页面是否显示"机构登录"/"校外访问"（有则说明未登录）
+    page_text = await page.evaluate("() => document.body.innerText.slice(0, 3000)")
+    not_logged = "机构登录" in page_text or "校外访问" in page_text
     if not_logged:
         return [TextContent(type="text", text="下载需要登录 CNKI。请先在 Chrome 中登录知网账号。")]
 
@@ -758,9 +799,9 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
             await page.locator('#pdfDown, .btn-dlpdf a').first.click()
         dl = await dl_info.value
         fname = dl.suggested_filename or 'paper.pdf'
-        # DOWNLOAD_DIR 环境变量控制下载保存位置
-        download_dir = os.environ.get("DOWNLOAD_DIR", os.getcwd())
-        save_path = Path(download_dir) / "downloads" / fname
+        # 下载到项目根目录下的 downloads/ 文件夹（Scholar_search/downloads/）
+        project_root = Path(__file__).parent.parent
+        save_path = project_root / "downloads" / fname
         save_path.parent.mkdir(exist_ok=True)
         await dl.save_as(str(save_path))
         return [TextContent(type="text",
