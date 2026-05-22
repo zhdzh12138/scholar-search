@@ -904,7 +904,7 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
         save_path = save_dir / fname
 
         # 优先用 dl.path() 获取临时文件，直接 copy（比 save_as 更可靠）
-        tmp = dl.path()
+        tmp = await dl.path()
         if tmp and Path(tmp).exists() and Path(tmp).stat().st_size > 0:
             shutil.copy2(str(tmp), str(save_path))
         else:
