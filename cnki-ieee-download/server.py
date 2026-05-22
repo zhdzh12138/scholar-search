@@ -34,7 +34,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from carsi_search.engine import CarsiAuth, log
-from carsi_search.registry import list_dbs, get_db
+from carsi_search.registry import list_dbs, get_db, get_adapter
 
 # ── MCP Server 实例 ──────────────────────────────────────────────────
 app = Server("cnki-ieee-download")
@@ -298,7 +298,7 @@ async def handle_login(args: dict) -> list[TextContent]:
             # 检测 bot 验证（ScienceDirect 等）
             if "Are you a robot" in page_text or "robot?" in page_text.lower():
                 return [TextContent(type="text",
-                    text=f"🔐 {db_label} 显示了 bot 验证页面，请在 Chrome 中手动完成验证后让我重试。")]
+                    text=f"NEED_ACTION: {db_label} 显示了 Cloudflare 验证页面。请告诉用户在 Chrome 浏览器中手动完成验证，完成后告知你，然后重试。")]
             # ScienceDirect: 必须显示 "institutional Access via" 才算已登录
             if database == "sciencedirect":
                 is_logged_in = "institutional Access via" in page_text or "institutional access via" in page_text
@@ -320,7 +320,7 @@ async def handle_login(args: dict) -> list[TextContent]:
                  f"Cookie 已保存，下次启动自动恢复。")]
     else:
         return [TextContent(type="text",
-            text=f"🔐 尚未登录 {db_label}。Chrome 窗口已打开，请在 Chrome 中手动登录后让我重试。")]
+            text=f"NEED_LOGIN: 尚未登录 {db_label}。请告诉用户在 Chrome 浏览器中手动登录 {db_label}，登录完成后告知你，然后重试。")]
 
 async def _try_cookie_session(db: str) -> bool:
     """
@@ -402,16 +402,17 @@ async def handle_search(args: dict) -> list[TextContent]:
     if not _auth or not _pages.get(db):
         if not await _try_cookie_session(db):
             return [TextContent(type="text",
-                text=f"🔐 未登录 {db}。Chrome 窗口已打开，请在 Chrome 中手动登录 {db}，然后让我重试。")]
+                text=f"NEED_LOGIN: {db} 未登录。请告诉用户在 Chrome 浏览器中手动登录 {db}，登录完成后告知你，然后重试此操作。")]
         log.info("[CDP] Session restored from cookies")
 
-    result = await _auth.search(_pages[db], db, args["query"], page_num=args.get("page", 1))
+    adapter = await get_adapter(db, _pages[db])
+    result = await adapter.search(args["query"], page=args.get("page", 1))
 
     if not result.get("success"):
         err = result.get("error", "")
         if err == "captcha":
             return [TextContent(type="text",
-                text='🔐 ScienceDirect 检测到自动化访问，显示了 Cloudflare 验证页面。请在 Chrome 中手动完成验证后让我重试搜索。')]
+                text='NEED_ACTION: ScienceDirect 显示了 Cloudflare 验证。请告诉用户在 Chrome 浏览器中手动完成验证，完成后告知你，然后重试搜索。')]
         return [TextContent(type="text", text=f"Search failed: {err}")]
 
     papers = result.get("papers", [])
@@ -445,16 +446,17 @@ async def handle_detail(args: dict) -> list[TextContent]:
     if not _auth or not _pages.get(db or "ieee"):
         if not await _try_cookie_session(db or "ieee"):
             return [TextContent(type="text",
-                text=f"🔐 未登录。Chrome 窗口已打开，请在 Chrome 中登录后让我重试。")]
+                text=f"NEED_LOGIN: 未登录。请告诉用户在 Chrome 浏览器中登录 {db or 'ieee'}，登录完成后告知你，然后重试。")]
         log.info("[CDP] Session restored from cookies")
 
-    result = await _auth.detail(_pages[db or "ieee"], db or "ieee", args["url"])
+    adapter = await get_adapter(db or "ieee", _pages[db or "ieee"])
+    result = await adapter.detail(args["url"])
 
     if not result.get("success"):
         err = result.get("error", "")
         if err == "captcha":
             return [TextContent(type="text",
-                text='🔐 ScienceDirect 检测到自动化访问，请在 Chrome 中手动完成验证后让我重试。')]
+                text='NEED_ACTION: ScienceDirect 详情页显示了 Cloudflare 验证。请告诉用户在 Chrome 中手动完成验证，完成后告知你，然后重试。')]
         return [TextContent(type="text", text=f"Detail failed: {err}")]
 
     text = ""
@@ -499,7 +501,7 @@ async def handle_download(args: dict) -> list[TextContent]:
     if not _auth or not _pages.get(db or "ieee"):
         if not await _try_cookie_session(db or "ieee"):
             return [TextContent(type="text",
-                text=f"🔐 未登录 {db or 'ieee'}。Chrome 窗口已打开，请在 Chrome 中登录后让我重试下载。")]
+                text=f"NEED_LOGIN: 未登录 {db or 'ieee'}。请告诉用户在 Chrome 浏览器中登录 {db or 'ieee'}，登录完成后告知你，然后重试下载。")]
         log.info("[CDP] Session restored from cookies")
 
     page = _pages[db or "ieee"]
@@ -508,10 +510,11 @@ async def handle_download(args: dict) -> list[TextContent]:
 
     # 第一步：如果 URL 不是 PDF 直链，先获取论文详情找到 PDF 链接
     if "stamp.jsp" not in url and "/pdf/" not in url and "getPDF.jsp" not in url and "pdfft" not in url:
-        detail_result = await _auth.detail(page, db or "ieee", url)
+        adapter = await get_adapter(db or "ieee", page)
+        detail_result = await adapter.detail(url)
         if detail_result.get("error") == "captcha":
             return [TextContent(type="text",
-                text='🔐 ScienceDirect 显示了验证页面，请在 Chrome 中手动完成验证后让我重试。')]
+                text='NEED_ACTION: ScienceDirect 下载需要验证。请告诉用户在 Chrome 浏览器中手动完成 Cloudflare 验证，完成后告知你，然后重试下载。')]
         if detail_result.get("pdfUrl"):
             url = detail_result["pdfUrl"]
         if not title and detail_result.get("title"):
@@ -558,7 +561,7 @@ async def handle_download(args: dict) -> list[TextContent]:
                     break
             else:
                 return [TextContent(type="text",
-                    text='🔐 ScienceDirect PDF 域名显示了 Cloudflare 验证页面。请在 Chrome 中手动完成验证后让我重试下载。')]
+                    text='NEED_ACTION: ScienceDirect PDF 域名显示了 Cloudflare 验证。请告诉用户在 Chrome 浏览器中手动完成验证，完成后告知你，然后重试下载。')]
 
         await asyncio.sleep(2)
 
@@ -610,9 +613,8 @@ async def handle_download(args: dict) -> list[TextContent]:
                 text=f"Download failed: response is not a PDF (可能是登录过期或权限不足).\n"
                      f"Opened page in browser for manual download.\nFirst bytes: {snippet[:100]}")]
         # 第五步：保存 PDF 到本地
-        # 下载到项目根目录下的 downloads/ 文件夹（Scholar_search/downloads/）
-        project_root = Path(__file__).parent.parent
-        downloads_dir = project_root / "downloads"
+        # 下载到调用者项目目录下的 downloads/ 文件夹
+        downloads_dir = Path(os.getcwd()) / "downloads"
         downloads_dir.mkdir(exist_ok=True)
         if title:
             # 文件名安全处理：移除非法字符，限制长度
@@ -843,7 +845,7 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
     not_logged = "机构登录" in page_text or "校外访问" in page_text
     if not_logged:
         return [TextContent(type="text",
-            text='🔐 CNKI 未登录。Chrome 窗口已打开，请在 Chrome 中点击"机构登录"登录知网。登录后让我重试下载。')]
+            text='NEED_LOGIN: CNKI 未登录。请告诉用户在 Chrome 浏览器中点击"机构登录"登录知网，登录完成后告知你，然后重试下载。')]
 
     # 检查是否出现滑块验证码
     captcha = await page.evaluate("""() => {
@@ -864,9 +866,8 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
             await page.locator('#pdfDown, .btn-dlpdf a').first.click()
         dl = await dl_info.value
         fname = dl.suggested_filename or 'paper.pdf'
-        # 下载到项目根目录下的 downloads/ 文件夹（Scholar_search/downloads/）
-        project_root = Path(__file__).parent.parent
-        save_path = project_root / "downloads" / fname
+        # 下载到调用者项目目录下的 downloads/ 文件夹
+        save_path = Path(os.getcwd()) / "downloads" / fname
         save_path.parent.mkdir(exist_ok=True)
         await dl.save_as(str(save_path))
 
@@ -874,7 +875,7 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
         file_size = save_path.stat().st_size
         if file_size == 0:
             return [TextContent(type="text",
-                text="CNKI 下载失败：文件为空（0 bytes）。可能是 CNKI 下载接口变更或 cookie 过期，请在 Chrome 中重新登录 CNKI 后重试。")]
+                text="NEED_LOGIN: CNKI 下载失败（文件为空）。请告诉用户在 Chrome 浏览器中重新登录 CNKI，登录完成后告知你，然后重试。")]
 
         with open(save_path, 'rb') as f:
             header = f.read(4)
