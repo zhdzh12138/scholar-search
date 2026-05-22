@@ -443,6 +443,9 @@ async def handle_search(args: dict) -> list[TextContent]:
         if p.get('url'): text += f"   URL: {p['url']}\n"
         text += "\n"
     text += "-> Use detail(url=URL) for full metadata"
+    # 搜索成功后保存 cookie，确保会话持久化
+    try: await _auth.save_state()
+    except: pass
     return [TextContent(type="text", text=text)]
 
 
@@ -491,6 +494,9 @@ async def handle_detail(args: dict) -> list[TextContent]:
         text += f"**Download**: use download(url=\"{result['pdfUrl']}\")\n"
     if result.get("citation"): text += f"\n**Citation**\n{result['citation']}\n"
 
+    # 详情获取成功后保存 cookie
+    try: await _auth.save_state()
+    except: pass
     return [TextContent(type="text", text=text or "No details extracted.")]
 
 
@@ -640,6 +646,9 @@ async def handle_download(args: dict) -> list[TextContent]:
             filename = f"paper_{int(__import__('time').time())}.pdf"
         save_path = downloads_dir / filename
         save_path.write_bytes(pdf_data)
+        # 下载成功后保存 cookie
+        try: await _auth.save_state()
+        except: pass
         return [TextContent(type="text",
             text=f"Downloaded PDF ({len(pdf_data)} bytes)\nSaved: {save_path}")]
     else:
@@ -935,6 +944,9 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
                      f"内容预览: {content_preview[:100]}\n"
                      f"请检查 CNKI 登录状态，或在 Chrome 中手动下载。")]
 
+        # CNKI 下载成功后保存 cookie
+        try: await _auth.save_state()
+        except: pass
         return [TextContent(type="text",
             text=f"CNKI PDF 下载成功：{fname}\n"
                  f"大小: {file_size} bytes\n保存: {save_path}")]
