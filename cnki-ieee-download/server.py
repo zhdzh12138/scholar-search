@@ -56,76 +56,91 @@ DB_LIST = ", ".join(list_dbs())
 async def list_tools() -> list[Tool]:
     """注册所有 MCP 工具。每个 Tool 定义了名称、描述和参数 schema。"""
     return [
-        # ── 统一 CDP 工具 ──────────────────────────────────────────
-        # login: 连接 Chrome 并检测数据库登录状态
-        # 用户需在 Chrome 中手动登录，cookie 自动保存供后续恢复
+        # ── IEEE 工具 ──────────────────────────────────────────
         Tool(
-            name="login",
-            description=f"Connect Chrome via CDP and check login status for a database. Auto-launches Chrome if not running. Available: {DB_LIST}.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "database": {"type": "string", "description": f"Database key: {DB_LIST}"},
-                },
-                "required": ["database"]
-            }
+            name="ieee_login",
+            description="Connect Chrome via CDP and check IEEE Xplore login status. Auto-launches Chrome if needed.",
+            inputSchema={"type": "object", "properties": {}, "required": []}
         ),
-        # search: 在 IEEE 中搜索论文（需先 login 或 cookie 已恢复）
         Tool(
-            name="search",
-            description=f"Search papers in IEEE. Requires prior login. Available: {DB_LIST}.",
+            name="ieee_search",
+            description="Search IEEE Xplore for papers. Requires prior login via ieee_login.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search keywords"},
-                    "database": {"type": "string", "description": f"Database override. {DB_LIST}"},
                     "page": {"type": "integer", "description": "Page number", "default": 1},
                 },
                 "required": ["query"]
             }
         ),
-        # detail: 获取论文完整元数据
         Tool(
-            name="detail",
-            description="Get full paper metadata: abstract, authors, affiliation, keywords, DOI, PDF link, citation.",
+            name="ieee_detail",
+            description="Get full paper metadata from an IEEE Xplore paper page.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "Paper detail page URL"},
-                    "database": {"type": "string", "description": f"Database key. {DB_LIST}"},
+                    "url": {"type": "string", "description": "IEEE paper detail page URL"},
                 },
                 "required": ["url"]
             }
         ),
-        # download: 下载 IEEE 论文 PDF 到 project downloads/
         Tool(
-            name="download",
-            description="Download a paper PDF from IEEE. Uses browser JS fetch with CARSI cookies. Saves to downloads/.",
+            name="ieee_download",
+            description="Download a paper PDF from IEEE Xplore. Uses browser JS fetch with CARSI cookies. Saves to downloads/.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "Paper detail URL (or direct PDF URL)"},
+                    "url": {"type": "string", "description": "IEEE paper detail URL (or direct PDF URL)"},
                     "title": {"type": "string", "description": "Paper title (used as filename)."},
-                    "database": {"type": "string", "description": f"Database key. {DB_LIST}"},
                 },
                 "required": ["url"]
             }
         ),
-        # status: CDP 连接状态 + 数据库列表
+
+        # ── ScienceDirect 工具 ──────────────────────────────────
         Tool(
-            name="status",
-            description="Check CDP connection status and list available databases.",
+            name="sciencedirect_login",
+            description="Connect Chrome and check ScienceDirect login status. Cloudflare may require manual verification.",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
-        # logout: 断开 CDP（不关闭 Chrome）
         Tool(
-            name="logout",
-            description="Disconnect CDP connection. Does NOT close Chrome browser.",
-            inputSchema={"type": "object", "properties": {}, "required": []}
+            name="sciencedirect_search",
+            description="Search ScienceDirect for papers. Requires prior login via sciencedirect_login.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search keywords"},
+                    "page": {"type": "integer", "description": "Page number", "default": 1},
+                },
+                "required": ["query"]
+            }
+        ),
+        Tool(
+            name="sciencedirect_detail",
+            description="Get full paper metadata from a ScienceDirect article page.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "ScienceDirect article URL"},
+                },
+                "required": ["url"]
+            }
+        ),
+        Tool(
+            name="sciencedirect_download",
+            description="Download a paper PDF from ScienceDirect. Cloudflare may require manual verification. Saves to downloads/.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "ScienceDirect article URL or pdfft URL"},
+                    "title": {"type": "string", "description": "Paper title (used as filename)."},
+                },
+                "required": ["url"]
+            }
         ),
 
         # ── CNKI 工具 ───────────────────────────────────────────
-        # cnki_search: 搜索中国知网论文
         Tool(
             name="cnki_search",
             description="Search CNKI (中国知网) for papers. Supports advanced filters. Auto-connects Chrome if needed.",
@@ -143,13 +158,11 @@ async def list_tools() -> list[Tool]:
                 "required": ["query"]
             }
         ),
-        # cnki_login: no-op，提示用户手动登录
         Tool(
             name="cnki_login",
             description="Check CNKI login status. User logs in manually in Chrome; this tool only checks and reports.",
             inputSchema={"type": "object", "properties": {}, "required": []}
         ),
-        # cnki_detail: CNKI 论文详情
         Tool(
             name="cnki_detail",
             description="Get full paper metadata from a CNKI paper detail page.",
@@ -161,7 +174,6 @@ async def list_tools() -> list[Tool]:
                 "required": ["url"]
             }
         ),
-        # cnki_download: CNKI PDF/CAJ 下载
         Tool(
             name="cnki_download",
             description="Download a paper PDF/CAJ from CNKI. Requires user to be logged in to CNKI in Chrome.",
@@ -172,6 +184,18 @@ async def list_tools() -> list[Tool]:
                 },
                 "required": ["url"]
             }
+        ),
+
+        # ── 通用工具 ───────────────────────────────────────────
+        Tool(
+            name="status",
+            description="Check CDP connection status and list available databases.",
+            inputSchema={"type": "object", "properties": {}, "required": []}
+        ),
+        Tool(
+            name="logout",
+            description="Disconnect CDP connection. Does NOT close Chrome browser.",
+            inputSchema={"type": "object", "properties": {}, "required": []}
         ),
     ]
 
@@ -191,17 +215,23 @@ async def call_tool(name: str, args: dict) -> list[TextContent]:
     t0 = time.time()
     try:
         # IEEE 工具
-        if name == "login":    result = await handle_login(args)
-        elif name == "search":   result = await handle_search(args)
-        elif name == "detail":   result = await handle_detail(args)
-        elif name == "download": result = await handle_download(args)
-        elif name == "status":   result = await handle_status(args)
-        elif name == "logout":   result = await handle_logout(args)
+        if name == "ieee_login":     result = await handle_login({"database": "ieee"})
+        elif name == "ieee_search":  args["database"] = "ieee"; result = await handle_search(args)
+        elif name == "ieee_detail":  args["database"] = "ieee"; result = await handle_detail(args)
+        elif name == "ieee_download": args["database"] = "ieee"; result = await handle_download(args)
+        # ScienceDirect 工具
+        elif name == "sciencedirect_login":     result = await handle_login({"database": "sciencedirect"})
+        elif name == "sciencedirect_search":  args["database"] = "sciencedirect"; result = await handle_search(args)
+        elif name == "sciencedirect_detail":  args["database"] = "sciencedirect"; result = await handle_detail(args)
+        elif name == "sciencedirect_download": args["database"] = "sciencedirect"; result = await handle_download(args)
         # CNKI 工具
         elif name == "cnki_search":  result = await handle_cnki_search(args)
         elif name == "cnki_login":   result = await handle_cnki_login(args)
         elif name == "cnki_detail":  result = await handle_cnki_detail(args)
         elif name == "cnki_download": result = await handle_cnki_download(args)
+        # 通用工具
+        elif name == "status":   result = await handle_status(args)
+        elif name == "logout":   result = await handle_logout(args)
         else: return [TextContent(type="text", text=f"Unknown tool: {name}")]
         elapsed = time.time() - t0
         result[0].text += f"\n\n⏱ {elapsed:.1f}s"
@@ -263,14 +293,21 @@ async def handle_login(args: dict) -> list[TextContent]:
 
     is_logged_in = False
     if not is_on_login_page and target_domain in current_url:
-        # 根据数据库类型检查页面上的未登录标识
         try:
             page_text = await page.evaluate("() => document.body.innerText.slice(0, 5000)")
-            # CNKI: 页面有"机构登录"/"校外访问"说明未登录
-            # IEEE: 页面有"Institutional Sign In"说明未登录
-            not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
-            has_login_prompt = any(kw in page_text for kw in not_logged_indicators)
-            is_logged_in = not has_login_prompt
+            # 检测 bot 验证（ScienceDirect 等）
+            if "Are you a robot" in page_text or "robot?" in page_text.lower():
+                return [TextContent(type="text",
+                    text=f"🔐 {db_label} 显示了 bot 验证页面，请在 Chrome 中手动完成验证后让我重试。")]
+            # ScienceDirect: 成功标志是显示 institutional access
+            if database == "sciencedirect":
+                is_logged_in = "institutional Access" in page_text or "institutional access" in page_text
+            # CNKI: 有"机构登录"/"校外访问"说明未登录
+            # IEEE: 有"Institutional Sign In"说明未登录
+            else:
+                not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
+                has_login_prompt = any(kw in page_text for kw in not_logged_indicators)
+                is_logged_in = not has_login_prompt
         except Exception:
             is_logged_in = True
 
@@ -322,19 +359,25 @@ async def _try_cookie_session(db: str) -> bool:
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await page.goto(db_config["home_url"], wait_until="domcontentloaded", timeout=30000)
 
-    # 检查是否已登录：URL 不在登录页 + 页面无未登录标识
+    # 检查是否已登录
     url = page.url
     if (target_domain in url
             and "login" not in url.lower()
             and "wayf" not in url.lower()
             and "cas" not in url.lower()):
-        # 检查页面上的未登录标识
         try:
             page_text = await page.evaluate("() => document.body.innerText.slice(0, 5000)")
-            not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
-            if any(kw in page_text for kw in not_logged_indicators):
-                await auth.stop()
-                return False
+            # ScienceDirect: 成功标志是显示 institutional access
+            if db == "sciencedirect":
+                if "institutional Access" not in page_text and "institutional access" not in page_text:
+                    await auth.stop()
+                    return False
+            # CNKI/IEEE: 检查未登录标识
+            else:
+                not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
+                if any(kw in page_text for kw in not_logged_indicators):
+                    await auth.stop()
+                    return False
         except Exception:
             pass
         _auth = auth
@@ -367,7 +410,11 @@ async def handle_search(args: dict) -> list[TextContent]:
     result = await _auth.search(_page, db, args["query"], page_num=args.get("page", 1))
 
     if not result.get("success"):
-        return [TextContent(type="text", text=f"Search failed: {result.get('error', '')}")]
+        err = result.get("error", "")
+        if err == "captcha":
+            return [TextContent(type="text",
+                text='🔐 ScienceDirect 检测到自动化访问，显示了 Cloudflare 验证页面。请在 Chrome 中手动完成验证后让我重试搜索。')]
+        return [TextContent(type="text", text=f"Search failed: {err}")]
 
     papers = result.get("papers", [])
     if not papers:
@@ -406,7 +453,11 @@ async def handle_detail(args: dict) -> list[TextContent]:
     result = await _auth.detail(_page, db or "ieee", args["url"])
 
     if not result.get("success"):
-        return [TextContent(type="text", text=f"Detail failed: {result.get('error', '')}")]
+        err = result.get("error", "")
+        if err == "captcha":
+            return [TextContent(type="text",
+                text='🔐 ScienceDirect 检测到自动化访问，请在 Chrome 中手动完成验证后让我重试。')]
+        return [TextContent(type="text", text=f"Detail failed: {err}")]
 
     text = ""
     if result.get("abstract"): text += f"**Abstract**\n{result['abstract']}\n\n"
@@ -457,8 +508,11 @@ async def handle_download(args: dict) -> list[TextContent]:
     title = args.get("title", "")
 
     # 第一步：如果 URL 不是 PDF 直链，先获取论文详情找到 PDF 链接
-    if "stamp.jsp" not in url and "/pdf/" not in url and "getPDF.jsp" not in url:
+    if "stamp.jsp" not in url and "/pdf/" not in url and "getPDF.jsp" not in url and "pdfft" not in url:
         detail_result = await _auth.detail(_page, db or "ieee", url)
+        if detail_result.get("error") == "captcha":
+            return [TextContent(type="text",
+                text='🔐 ScienceDirect 显示了验证页面，请在 Chrome 中手动完成验证后让我重试。')]
         if detail_result.get("pdfUrl"):
             url = detail_result["pdfUrl"]
         if not title and detail_result.get("title"):
@@ -477,23 +531,76 @@ async def handle_download(args: dict) -> list[TextContent]:
         if arnumber:
             url = f"https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={arnumber}"
 
-    # 第三步：通过浏览器 JS fetch 下载 PDF（利用浏览器已有的认证 Cookie）
+    # 第三步：通过浏览器下载 PDF
+    # ScienceDirect: 需要先导航到 pdfft URL（重定向到 pdf.sciencedirectassets.com），再 fetch
+    # IEEE: 直接 fetch 即可
     import base64, re
-    pdf_b64 = await _page.evaluate(f"""
-        async () => {{
-            try {{
-                const resp = await fetch('{url}');
-                if (!resp.ok) return 'HTTP ' + resp.status;
-                const buf = await resp.arrayBuffer();
-                const bytes = new Uint8Array(buf);
-                let binary = '';
-                for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-                return btoa(binary);
-            }} catch(e) {{
-                return 'ERROR:' + e.message;
+
+    is_sciencedirect = "sciencedirect" in url or "sciencedirectassets" in _page.url
+
+    if is_sciencedirect and "/pdfft" in url:
+        # ScienceDirect: 导航到 PDF 页面，等重定向到 pdf.sciencedirectassets.com
+        try: await _page.unroute("**/*")
+        except: pass
+        await _page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        # 等重定向完成
+        for _ in range(20):
+            await asyncio.sleep(1)
+            if "sciencedirectassets" in _page.url:
+                break
+
+        # 检测 Cloudflare 验证
+        page_text = await _page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")
+        if "robot" in page_text.lower():
+            # 等待用户手动完成验证
+            for _ in range(40):  # 最多等 120 秒
+                await asyncio.sleep(3)
+                page_text = await _page.evaluate("() => document.body?.innerText?.slice(0, 500) || ''")
+                if "robot" not in page_text.lower():
+                    break
+            else:
+                return [TextContent(type="text",
+                    text='🔐 ScienceDirect PDF 域名显示了 Cloudflare 验证页面。请在 Chrome 中手动完成验证后让我重试下载。')]
+
+        # 等 PDF 完全加载
+        await asyncio.sleep(2)
+
+        # 从当前 PDF 页面 fetch
+        current_url = _page.url
+        pdf_b64 = await _page.evaluate(f"""
+            async () => {{
+                try {{
+                    const resp = await fetch(window.location.href);
+                    if (!resp.ok) return 'HTTP ' + resp.status;
+                    const buf = await resp.arrayBuffer();
+                    const bytes = new Uint8Array(buf);
+                    let binary = '';
+                    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+                    return btoa(binary);
+                }} catch(e) {{
+                    return 'ERROR:' + e.message;
+                }}
             }}
-        }}
-    """)
+        """)
+    else:
+        # IEEE: 直接 fetch
+        try: await _page.unroute("**/*")
+        except: pass
+        pdf_b64 = await _page.evaluate(f"""
+            async () => {{
+                try {{
+                    const resp = await fetch('{url}');
+                    if (!resp.ok) return 'HTTP ' + resp.status;
+                    const buf = await resp.arrayBuffer();
+                    const bytes = new Uint8Array(buf);
+                    let binary = '';
+                    for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+                    return btoa(binary);
+                }} catch(e) {{
+                    return 'ERROR:' + e.message;
+                }}
+            }}
+        """)
 
     if pdf_b64 and not pdf_b64.startswith('ERROR:') and not pdf_b64.startswith('HTTP '):
         pdf_data = base64.b64decode(pdf_b64)

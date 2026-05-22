@@ -24,6 +24,24 @@ DB_REGISTRY = {
         "adapter": "carsi_search.databases.ieee:IeeeAdapter",
     },
 
+    "sciencedirect": {
+        "name": "sciencedirect",
+        "label": "ScienceDirect (Elsevier)",
+        "sp_url": (
+            "https://auth.elsevier.com/ShibAuth/institutionLogin"
+            "?entityID={entity_id_raw}"
+            "&appReturnURL=https%3A%2F%2Fwww.sciencedirect.com"
+        ),
+        "home_url": "https://www.sciencedirect.com/",
+        "cookie_accept": [
+            'button:has-text("Accept All")',
+            'button:has-text("Accept all cookies")',
+            '#onetrust-accept-btn-handler',
+        ],
+        "target_url_pattern": "**/sciencedirect.com/**",
+        "adapter": "carsi_search.databases.sciencedirect:ScienceDirectAdapter",
+    },
+
     "cnki": {
         "name": "cnki",
         "label": "CNKI 知网",
