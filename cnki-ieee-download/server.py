@@ -33,7 +33,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from carsi_search.engine import CarsiAuth
+from carsi_search.engine import CarsiAuth, log
 from carsi_search.registry import list_dbs, get_db
 
 # ── MCP Server 实例 ──────────────────────────────────────────────────
@@ -276,14 +276,15 @@ async def handle_login(args: dict) -> list[TextContent]:
     home_url = db_config["home_url"]
     target_domain = home_url.split("/")[2]
 
-    # 查找已有的目标数据库标签页，或打开新页
+    # 查找已有的目标数据库标签页，或创建新页
     page = None
     for p in ctx.pages:
         if target_domain in p.url and "login" not in p.url.lower():
             page = p
             break
     if not page:
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        # 创建新标签页，不复用其他数据库的页面
+        page = await ctx.new_page()
         await page.goto(home_url, wait_until="domcontentloaded", timeout=30000)
 
     # 检测登录状态：先检查 URL 是否在登录页面，再检查页面内容
@@ -298,9 +299,9 @@ async def handle_login(args: dict) -> list[TextContent]:
             if "Are you a robot" in page_text or "robot?" in page_text.lower():
                 return [TextContent(type="text",
                     text=f"🔐 {db_label} 显示了 bot 验证页面，请在 Chrome 中手动完成验证后让我重试。")]
-            # ScienceDirect: 成功标志是显示 institutional access
+            # ScienceDirect: 必须显示 "institutional Access via" 才算已登录
             if database == "sciencedirect":
-                is_logged_in = "institutional Access" in page_text or "institutional access" in page_text
+                is_logged_in = "institutional Access via" in page_text or "institutional access via" in page_text
             # CNKI: 有"机构登录"/"校外访问"说明未登录
             # IEEE: 有"Institutional Sign In"说明未登录
             else:
@@ -365,9 +366,9 @@ async def _try_cookie_session(db: str) -> bool:
             and "cas" not in url.lower()):
         try:
             page_text = await page.evaluate("() => document.body.innerText.slice(0, 5000)")
-            # ScienceDirect: 成功标志是显示 institutional access
+            # ScienceDirect: 必须显示 "institutional Access via" 才算已登录
             if db == "sciencedirect":
-                if "institutional Access" not in page_text and "institutional access" not in page_text:
+                if "institutional Access via" not in page_text and "institutional access via" not in page_text:
                     await auth.stop()
                     return False
             # CNKI/IEEE: 检查未登录标识
@@ -868,9 +869,28 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
         save_path = project_root / "downloads" / fname
         save_path.parent.mkdir(exist_ok=True)
         await dl.save_as(str(save_path))
+
+        # 验证下载内容是否为有效 PDF
+        file_size = save_path.stat().st_size
+        if file_size == 0:
+            return [TextContent(type="text",
+                text="CNKI 下载失败：文件为空（0 bytes）。可能是 CNKI 下载接口变更或 cookie 过期，请在 Chrome 中重新登录 CNKI 后重试。")]
+
+        with open(save_path, 'rb') as f:
+            header = f.read(4)
+        if header != b'%PDF':
+            # 不是 PDF，可能是 HTML 错误页面
+            with open(save_path, 'rb') as f:
+                content_preview = f.read(200).decode('utf-8', errors='replace')
+            save_path.unlink()  # 删除无效文件
+            return [TextContent(type="text",
+                text=f"CNKI 下载失败：返回的不是 PDF 文件。\n"
+                     f"内容预览: {content_preview[:100]}\n"
+                     f"请检查 CNKI 登录状态，或在 Chrome 中手动下载。")]
+
         return [TextContent(type="text",
             text=f"CNKI PDF 下载成功：{fname}\n"
-                 f"大小: {save_path.stat().st_size} bytes\n保存: {save_path}")]
+                 f"大小: {file_size} bytes\n保存: {save_path}")]
     except PwError:
         return [TextContent(type="text", text="下载超时。PDF 可能已在浏览器中打开，请手动保存。")]
 
