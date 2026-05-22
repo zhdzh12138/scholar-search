@@ -9,10 +9,10 @@ chrome --remote-debugging-port=9222     ← 自动启动（如未运行）
        ↓
 CDP 连接 (carsi_search/engine.py)      ← cookie 保存/恢复
        ↓
-┌──────────┬──────────┬──────────┐
-│   IEEE   │   Elsevier│   CNKI   │
-│  CARSI   │  CARSI   │   CDP    │
-└──────────┴──────────┴──────────┘
+┌──────────┬───────────┬──────────┐
+│   IEEE   │Elsevier   │   CNKI   │
+│  CARSI   │  CARSI    │   CDP    │
+└──────────┴───────────┴──────────┘
 ```
 
 ## 安装
@@ -24,22 +24,27 @@ pip install playwright mcp
 python -m playwright install chromium
 ```
 
-注册 MCP（全局配置）：
+注册 MCP（全局配置，使用绝对路径）：
 
 ```bash
-claude mcp add cnki-ieee -- python ~/scholar-search/cnki-ieee-download/server.py
+claude mcp add cnki-ieee-download -- python ~/scholar-search/cnki-ieee-download/server.py
 ```
 
 或编辑 `.mcp.json`（参考 `.mcp.json.example`）：
 
 ```json
 {
-  "carsi-search": {
-    "command": "python",
-    "args": ["~/scholar-search/cnki-ieee-download/server.py"]
+  "mcpServers": {
+    "cnki-ieee-download": {
+      "command": "python",
+      "args": ["C:/Users/你的用户名/scholar-search/cnki-ieee-download/server.py"],
+      "allowInteractive": true
+    }
   }
 }
 ```
+
+> `allowInteractive: true` 允许 MCP server 在需要用户操作时（如登录、过验证码）向 Claude 发送交互提示。
 
 ## MCP 工具
 
@@ -57,7 +62,7 @@ claude mcp add cnki-ieee -- python ~/scholar-search/cnki-ieee-download/server.py
 | `cnki_login` | 检测 CNKI 登录状态 |
 | `cnki_detail` | 获取 CNKI 论文详情 |
 | `cnki_download` | 下载 CNKI PDF/CAJ |
-| `status` | 显示 CDP 连接状态 |
+| `status` | 显示 CDP 连接状态和各数据库登录状态 |
 | `logout` | 断开 CDP（不关闭 Chrome） |
 
 ## 首次使用
@@ -67,9 +72,10 @@ claude mcp add cnki-ieee -- python ~/scholar-search/cnki-ieee-download/server.py
 3. 在 Chrome 窗口中**手动登录**：
    - CNKI：点击"机构登录" → 校外访问 → 选择学校
    - IEEE：点击"Institutional Sign In" → CARSI → 学校认证
+   - ScienceDirect：点击"Institutional Sign In" → CARSI → 学校认证
 4. Cookie 自动保存 — 后续启动无需重新登录
 5. 未登录时 Claude 会提示你在 Chrome 中登录
-6. PDF 下载到 `Scholar_search/downloads/`
+6. PDF 下载到调用项目的 `downloads/` 目录
 
 ## 功能覆盖
 
@@ -87,7 +93,7 @@ claude mcp add cnki-ieee -- python ~/scholar-search/cnki-ieee-download/server.py
 ```text
 scholar-search/
 ├── cnki-ieee-download/             # MCP 服务器
-│   └── carsi_search/               # CDP 引擎 + IEEE/CNKI 适配器
+│   ├── server.py                   # 入口 + 工具定义 + handler 函数
 │   └── carsi_search/               # CDP 引擎 + 数据库适配器
 ├── downloads/                      # PDF 下载目录
 ├── .mcp.json.example               # MCP 配置模板
@@ -101,7 +107,7 @@ scholar-search/
 | Claude Code | 是 | MCP 宿主 |
 | Chrome | 是（自动启动） | CDP 连接真实浏览器 |
 | Playwright + mcp | 是 | MCP 服务器运行时 |
-| 西电账号 | 下载需要 | IEEE CARSI 认证；CNKI 机构登录 |
+| 机构账号 | 下载需要 | IEEE/ScienceDirect CARSI 认证；CNKI 机构登录 |
 
 ## 致谢
 

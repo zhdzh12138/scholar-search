@@ -3,7 +3,8 @@
   "mcpServers": {
     "cnki-ieee-download": {
       "command": "python",
-      "args": ["C:/Users/你的用户名/scholar-search/cnki-ieee-download/server.py"]
+      "args": ["C:/Users/你的用户名/scholar-search/cnki-ieee-download/server.py"],
+      "allowInteractive": true
     }
   }
 }
