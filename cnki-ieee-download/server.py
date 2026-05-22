@@ -893,17 +893,25 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
         return [TextContent(type="text", text="未找到下载链接。")]
 
     # 点击下载按钮并拦截浏览器原生下载事件
+    import shutil
     try:
         async with page.expect_download(timeout=60000) as dl_info:
             await page.locator('#pdfDown, .btn-dlpdf a').first.click()
         dl = await dl_info.value
         fname = dl.suggested_filename or 'paper.pdf'
-        # 下载到调用者项目目录下的 downloads/ 文件夹
-        save_path = Path(os.getcwd()) / "downloads" / fname
-        save_path.parent.mkdir(exist_ok=True)
-        await dl.save_as(str(save_path))
+        save_dir = Path(os.getcwd()) / "downloads"
+        save_dir.mkdir(exist_ok=True)
+        save_path = save_dir / fname
 
-        # 验证下载内容是否为有效 PDF
+        # 优先用 dl.path() 获取临时文件，直接 copy（比 save_as 更可靠）
+        tmp = dl.path()
+        if tmp and Path(tmp).exists() and Path(tmp).stat().st_size > 0:
+            shutil.copy2(str(tmp), str(save_path))
+        else:
+            # fallback: save_as
+            await dl.save_as(str(save_path))
+
+        # 验证
         file_size = save_path.stat().st_size
         if file_size == 0:
             return [TextContent(type="text",
@@ -912,10 +920,8 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
         with open(save_path, 'rb') as f:
             header = f.read(4)
         if header != b'%PDF':
-            # 不是 PDF，可能是 HTML 错误页面
-            with open(save_path, 'rb') as f:
-                content_preview = f.read(200).decode('utf-8', errors='replace')
-            save_path.unlink()  # 删除无效文件
+            content_preview = save_path.read_bytes()[:200].decode('utf-8', errors='replace')
+            save_path.unlink()
             return [TextContent(type="text",
                 text=f"CNKI 下载失败：返回的不是 PDF 文件。\n"
                      f"内容预览: {content_preview[:100]}\n"
