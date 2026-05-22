@@ -358,7 +358,8 @@ async def _try_cookie_session(db: str) -> bool:
             page = p
             break
     if not page:
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        # 创建新标签页，不复用其他数据库的页面
+        page = await ctx.new_page()
         await page.goto(db_config["home_url"], wait_until="domcontentloaded", timeout=30000)
 
     # 检查是否已登录
@@ -776,7 +777,7 @@ async def handle_cnki_detail(args: dict) -> list[TextContent]:
     获取 CNKI 论文详情。通过 CDP 连接用户真实 Chrome，访问论文详情页，提取完整元数据。
     无需登录，但遇到验证码时需要用户手动处理。
     """
-    global _auth
+    global _auth, _pages
     if not _auth or not _auth.context:
         from carsi_search.engine import CarsiAuth
         _auth = CarsiAuth()
@@ -785,14 +786,21 @@ async def handle_cnki_detail(args: dict) -> list[TextContent]:
         except RuntimeError as e:
             return [TextContent(type="text", text=str(e))]
     ctx = _auth.context
-    # 查找已有的 CNKI 标签页复用
-    page = None
-    for p in ctx.pages:
-        if 'cnki.net' in p.url:
-            page = p
-            break
+    # 优先使用已缓存的 CNKI 页面
+    page = _pages.get("cnki")
+    if page:
+        try:
+            _ = page.url
+        except Exception:
+            page = None
     if not page:
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        for p in ctx.pages:
+            if 'cnki.net' in p.url:
+                page = p
+                break
+    if not page:
+        page = await ctx.new_page()
+    _pages["cnki"] = page
 
     from carsi_search.databases.cnki import CnkiAdapter
     adapter = CnkiAdapter(page)
