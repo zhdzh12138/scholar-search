@@ -104,10 +104,30 @@ class IeeeAdapter(BaseAdapter):
                     document.querySelectorAll('.keyword a, .keywords a, [class*="keyword"] a')
                 ).map(a => norm(a.textContent)).filter(Boolean);
 
+                // 期刊/会议名
+                const venue = norm(
+                    document.querySelector('.publication-title a, [class*="publication-title"], [class*="stats-document"] a[href*="publication"]')?.textContent
+                );
+
+                // 卷号、页码
+                const statsText = norm(document.querySelector('.abstract-stats, [class*="doc-abstract"]')?.textContent || '');
+                const volume = (statsText.match(/[Vv]olume[:\\s]*(\\S+)/) || [])[1] || '';
+                const pages = (statsText.match(/[Pp]ages[:\\s]*(\\S+)/) || [])[1] || '';
+
+                // ISSN
+                const issn = norm(
+                    document.querySelector('a[href*="issn"], [class*="issn"]')?.textContent
+                );
+
+                // 发表日期
+                const pubDate = norm(
+                    document.querySelector('[class*="doc-abstract"] .u-pb-1, .published-date, [class*="date"]')?.textContent
+                );
+
                 const pdfLink = document.querySelector('a[href*="stamp.jsp"], a[href*="pdf"], .pdf-link a');
                 const pdfUrl = pdfLink?.href || '';
 
-                return { title, authors, abstract, doi, keywords, pdfUrl };
+                return { title, authors, abstract, doi, keywords, pdfUrl, venue, volume, pages, issn, pubDate };
             }
         """)
 

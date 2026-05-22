@@ -287,7 +287,7 @@ async def handle_login(args: dict) -> list[TextContent]:
         page = await ctx.new_page()
         await page.goto(home_url, wait_until="domcontentloaded", timeout=30000)
 
-    # 检测登录状态：先检查 URL 是否在登录页面，再检查页面内容
+    # 检测登录状态
     current_url = page.url
     is_on_login_page = any(kw in current_url.lower() for kw in ["login", "wayf", "cas", "authserver"])
 
@@ -295,19 +295,22 @@ async def handle_login(args: dict) -> list[TextContent]:
     if not is_on_login_page and target_domain in current_url:
         try:
             page_text = await page.evaluate("() => document.body.innerText.slice(0, 5000)")
-            # 检测 bot 验证（ScienceDirect 等）
-            if "Are you a robot" in page_text or "robot?" in page_text.lower():
+            # 检测 Cloudflare / bot 验证
+            if "Are you a robot" in page_text or "Just a moment" in page_text:
                 return [TextContent(type="text",
                     text=f"NEED_ACTION: {db_label} 显示了 Cloudflare 验证页面。请告诉用户在 Chrome 浏览器中手动完成验证，完成后告知你，然后重试。")]
-            # ScienceDirect: 必须显示 "institutional Access via" 才算已登录
             if database == "sciencedirect":
-                is_logged_in = "institutional Access via" in page_text or "institutional access via" in page_text
-            # CNKI: 有"机构登录"/"校外访问"说明未登录
-            # IEEE: 有"Institutional Sign In"说明未登录
+                # ScienceDirect: 有 "institutional Access via" = 已登录
+                # 没有 "Sign in" 按钮也可能是已登录（页面结构变化时的兜底）
+                has_inst = "institutional Access via" in page_text or "institutional access via" in page_text
+                has_sign_in = "Sign in" in page_text and "Sign in via" not in page_text
+                is_logged_in = has_inst or not has_sign_in
+            elif database == "cnki":
+                not_logged = "机构登录" in page_text or "校外访问" in page_text
+                is_logged_in = not not_logged
             else:
-                not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
-                has_login_prompt = any(kw in page_text for kw in not_logged_indicators)
-                is_logged_in = not has_login_prompt
+                not_logged = "Institutional Sign In" in page_text
+                is_logged_in = not not_logged
         except Exception:
             is_logged_in = True
 
@@ -366,15 +369,22 @@ async def _try_cookie_session(db: str) -> bool:
             and "cas" not in url.lower()):
         try:
             page_text = await page.evaluate("() => document.body.innerText.slice(0, 5000)")
-            # ScienceDirect: 必须显示 "institutional Access via" 才算已登录
+            # 检测 Cloudflare
+            if "Are you a robot" in page_text or "Just a moment" in page_text:
+                await auth.stop()
+                return False
             if db == "sciencedirect":
-                if "institutional Access via" not in page_text and "institutional access via" not in page_text:
+                has_inst = "institutional Access via" in page_text or "institutional access via" in page_text
+                has_sign_in = "Sign in" in page_text and "Sign in via" not in page_text
+                if not has_inst and has_sign_in:
                     await auth.stop()
                     return False
-            # CNKI/IEEE: 检查未登录标识
+            elif db == "cnki":
+                if "机构登录" in page_text or "校外访问" in page_text:
+                    await auth.stop()
+                    return False
             else:
-                not_logged_indicators = ["机构登录", "校外访问", "Institutional Sign In"]
-                if any(kw in page_text for kw in not_logged_indicators):
+                if "Institutional Sign In" in page_text:
                     await auth.stop()
                     return False
         except Exception:
@@ -471,6 +481,10 @@ async def handle_detail(args: dict) -> list[TextContent]:
     if result.get("keywords"):
         kws = result["keywords"] if isinstance(result["keywords"], list) else [result["keywords"]]
         text += f"**Keywords**: {', '.join(kws)}\n"
+    if result.get("volume"): text += f"**Volume**: {result['volume']}\n"
+    if result.get("pages"): text += f"**Pages**: {result['pages']}\n"
+    if result.get("issn"): text += f"**ISSN**: {result['issn']}\n"
+    if result.get("pubDate"): text += f"**Published**: {result['pubDate']}\n"
     if result.get("pdfUrl"):
         text += f"**PDF**: {result['pdfUrl']}\n"
         text += f"**Download**: use download(url=\"{result['pdfUrl']}\")\n"
@@ -696,7 +710,7 @@ async def handle_cnki_search(args: dict) -> list[TextContent]:
     CNKI 论文搜索。通过 CDP 连接用户真实 Chrome，打开知网搜索页，使用 CnkiAdapter 解析结果。
     搜索无需登录，但遇到验证码时需要用户在浏览器中手动完成。
     """
-    global _auth
+    global _auth, _pages
     if not _auth or not _auth.context:
         from carsi_search.engine import CarsiAuth
         _auth = CarsiAuth()
@@ -705,14 +719,23 @@ async def handle_cnki_search(args: dict) -> list[TextContent]:
         except RuntimeError as e:
             return [TextContent(type="text", text=str(e))]
     ctx = _auth.context
-    # 查找已有的 CNKI 标签页复用，避免重复打开
-    page = None
-    for p in ctx.pages:
-        if 'cnki.net' in p.url:
-            page = p
-            break
+    # 优先使用已缓存的 CNKI 页面
+    page = _pages.get("cnki")
+    if page:
+        try:
+            _ = page.url  # 检查页面是否还有效
+        except Exception:
+            page = None
+    # 查找已有的 CNKI 标签页
     if not page:
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        for p in ctx.pages:
+            if 'cnki.net' in p.url:
+                page = p
+                break
+    # 创建新标签页（不复用其他数据库的页面）
+    if not page:
+        page = await ctx.new_page()
+    _pages["cnki"] = page
 
     from carsi_search.databases.cnki import CnkiAdapter
     adapter = CnkiAdapter(page)
@@ -811,7 +834,7 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
 
     注意：用户必须在 Chrome 中已登录 CNKI，否则无法下载。
     """
-    global _auth
+    global _auth, _pages
     if not _auth or not _auth.context:
         from carsi_search.engine import CarsiAuth
         _auth = CarsiAuth()
@@ -820,14 +843,23 @@ async def handle_cnki_download(args: dict) -> list[TextContent]:
         except RuntimeError as e:
             return [TextContent(type="text", text=str(e))]
     ctx = _auth.context
-    # 查找已有的 CNKI 标签页复用，避免重复打开
-    page = None
-    for p in ctx.pages:
-        if 'cnki.net' in p.url:
-            page = p
-            break
+    # 优先使用已缓存的 CNKI 页面
+    page = _pages.get("cnki")
+    if page:
+        try:
+            _ = page.url  # 检查页面是否还有效
+        except Exception:
+            page = None
+    # 查找已有的 CNKI 标签页
     if not page:
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        for p in ctx.pages:
+            if 'cnki.net' in p.url:
+                page = p
+                break
+    # 创建新标签页（不复用其他数据库的页面）
+    if not page:
+        page = await ctx.new_page()
+    _pages["cnki"] = page
 
     url = args["url"]
     from playwright.async_api import Error as PwError
